@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<index version="1" name="SomBinário Scripts &amp; Plugins">
+  <category name="JSFX">
+    <reapack name="SomBinario_VCA_Punch.jsfx" type="effect" desc="SomBinario VCA Punch">
+      <metadata>
+        <description><![CDATA[Um Bus Compressor VCA hibrido com circuito Thrust integrado, 
+focado em 'glue' e saturacao compensada (THD).]]></description>
+        <link rel="website">https://sombinario.com</link>
+      </metadata>
+      <version name="1.0" author="Jorge Araujo (SomBinário)" time="2026-08-16T12:00:00Z">
+        <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_VCA_Punch.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+</index>
