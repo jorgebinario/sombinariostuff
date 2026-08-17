@@ -1,9 +1,9 @@
 // @description SomBinario VCA Punch
 // @author Jorge Araujo (SomBinario)
-// @version 1.0
+// @version 1.1.1
 // @about
 //   Um Bus Compressor VCA hibrido com circuito Thrust integrado, 
-//   focado em 'glue' e saturacao compensada (THD).
+//   focado em 'glue', saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).
 // @links
 //   Website https://sombinario.com
 // ------------------------------------------------------------------
@@ -15,19 +15,21 @@ slider1:-18<-50,15,0.1>-Threshold (dB)
 slider2:1<0,4,1{1.5:1,2:1,3:1,4:1,10:1}>-Ratio
 slider3:10<0.1,30,0.1>-Attack (ms)
 slider4:0.30<0.05,3,0.01>-Release (s)
-slider5:1<0,1,1{Manual,Auto}>-Auto Release
-slider6:1<0,2,1{Soft,Medium,Hard}>-Knee
-slider7:55<0,100,1>-Thrust (%)
-slider8:0<0,24,0.1>-Makeup Gain (dB)
-slider9:100<0,100,1>-Mix (%)
-slider10:15<0,100,1>-THD (%)
+slider5:1<0,1,1{Manual,Dual}>-Auto Release
+slider6:50<0,100,1>-Crest Factor (%)
+slider7:1<0,2,1{Soft,Medium,Hard}>-Knee
+slider8:55<0,100,1>-Thrust (%)
+slider9:0<0,24,0.1>-Makeup Gain (dB)
+slider10:100<0,100,1>-Mix (%)
+slider11:15<0,100,1>-THD (%)
+slider12:0<-18,18,0.1>-Output Trim (dB)
 
 @init
-sc_low = 0; detector_rms = 0; gain_smoothed = 1; gr_db = 0; gr_meter = 0;
+sc_low = 0; detector_rms = 0; peak_env = 0; gain_smoothed = 1; gr_db = 0; gr_meter = 0;
 active_knob = -1; last_mouse_cap = 0;
-start_mouse_y = 0; start_val_0 = 0; start_val_2 = 0;
-start_val_3 = 0; start_val_6 = 0; start_val_7 = 0;
-start_val_8 = 0; start_val_9 = 0;
+start_mouse_y = 0; start_val_0 = 0; start_val_2 = 0; start_val_3 = 0; 
+start_val_5 = 0; start_val_7 = 0; start_val_8 = 0; start_val_9 = 0; 
+start_val_10 = 0; start_val_11 = 0;
 
 @block
 threshold_db = slider1;
@@ -36,29 +38,33 @@ ratio_value = ratio_mode == 0 ? 1.5 : ratio_mode == 1 ? 2.0 : ratio_mode == 2 ? 
 attack_ms = slider3;
 release_s = slider4;
 auto_release = slider5;
-knee_mode = floor(slider6 + 0.5);
+crest_amount = slider6;
+knee_mode = floor(slider7 + 0.5);
 knee_width = knee_mode == 0 ? 12.0 : knee_mode == 1 ? 6.0 : 0.0;
-thrust_amount = slider7;
-makeup_db = slider8;
-mix_amount = slider9;
-thd_amount = slider10;
+thrust_amount = slider8;
+makeup_db = slider9;
+mix_amount = slider10;
+thd_amount = slider11;
+out_db = slider12;
 
 attack_coeff = exp(-1 / max(1, attack_ms * 0.001 * srate));
 release_coeff = exp(-1 / max(1, release_s * srate));
-auto_fast_coeff = exp(-1 / max(1, 0.08 * srate));
-auto_slow_coeff = exp(-1 / max(1, 0.90 * srate));
+auto_fast_coeff = exp(-1 / max(1, 0.04 * srate)); 
 detector_coeff = exp(-1 / max(1, 0.010 * srate));
 
 thrust_linear = thrust_amount * 0.01;
 makeup_linear = pow(10, makeup_db / 20);
 mix_linear = mix_amount * 0.01;
 thd_linear = thd_amount * 0.01;
+crest_linear = crest_amount * 0.01;
+out_linear = pow(10, out_db / 20);
 
 @sample
 input_l = spl0;
 input_r = spl1;
 
-sidechain = (abs(input_l) + abs(input_r)) * 0.5;
+// Anti-Denormal: Pequeno valor inaudivel para impedir ruidos e spikes de CPU
+sidechain = (abs(input_l) + abs(input_r)) * 0.5 + 0.000000001;
 
 sc_low += (sidechain - sc_low) * 0.004;
 sc_high = sidechain - sc_low;
@@ -66,8 +72,15 @@ sc_high = sidechain - sc_low;
 thrust_sidechain = sc_low * (1 - thrust_linear * 0.75) + sc_high * (1 + thrust_linear * 1.5);
 thrust_sidechain = max(0, thrust_sidechain);
 
+// --- CÁLCULO DE CREST FACTOR CORRIGIDO ---
+// Agora opera como um verdadeiro Envelope Seguidor de Pico
+peak_env = max(thrust_sidechain, peak_env * detector_coeff);
+peak_db = 20 * log(max(0.000000001, peak_env)) / log(10);
+
 detector_rms += (thrust_sidechain * thrust_sidechain - detector_rms) * (1 - detector_coeff);
-detector_db = 20 * log(max(0.0000001, sqrt(detector_rms))) / log(10);
+rms_db = 20 * log(max(0.000000001, sqrt(detector_rms))) / log(10);
+
+detector_db = peak_db * (1 - crest_linear) + rms_db * crest_linear;
 
 over_db = detector_db - threshold_db;
 
@@ -86,12 +99,14 @@ knee_width > 0 ? (
 target_gr = compressed_over * (1 - 1 / ratio_value);
 target_gain = pow(10, -target_gr / 20);
 
+// --- DUAL RELEASE CORRIGIDO E PROTEGIDO ---
 target_gain < gain_smoothed ? (
   gain_smoothed = target_gain + attack_coeff * (gain_smoothed - target_gain);
 ) : (
   auto_release > 0.5 ? (
-    auto_blend = min(1, gr_db / 12);
-    auto_coeff = auto_fast_coeff * (1 - auto_blend) + auto_slow_coeff * auto_blend;
+    diff_db = -20 * log(max(0.000000001, gain_smoothed)) / log(10) - target_gr;
+    auto_blend = min(1, max(0, diff_db / 6)); 
+    auto_coeff = auto_fast_coeff * auto_blend + release_coeff * (1 - auto_blend);
     gain_smoothed = target_gain + auto_coeff * (gain_smoothed - target_gain);
   ) : (
     gain_smoothed = target_gain + release_coeff * (gain_smoothed - target_gain);
@@ -103,7 +118,6 @@ gr_db = max(0, -20 * log(max(0.0000001, gain_smoothed)) / log(10));
 gr_meter_coeff = gr_db > gr_meter ? 0.25 : 0.02;
 gr_meter += (gr_db - gr_meter) * gr_meter_coeff;
 
-// Reporta a reducao de ganho para o meter nativo do REAPER
 ext_gr_meter = -gr_meter;
 
 wet_l = input_l * gain_smoothed * makeup_linear;
@@ -117,83 +131,53 @@ thd_linear > 0 ? (
   wet_r = wet_r * (1 - thd_linear) + sat_r * thd_linear;
 );
 
-spl0 = input_l * (1 - mix_linear) + wet_l * mix_linear;
-spl1 = input_r * (1 - mix_linear) + wet_r * mix_linear;
+spl0 = (input_l * (1 - mix_linear) + wet_l * mix_linear) * out_linear;
+spl1 = (input_r * (1 - mix_linear) + wet_r * mix_linear) * out_linear;
 
 @gfx 720 340
 gfx_getchar();
 
-// Se o espaco disponivel for pequeno (MCP/TCP Embed), desenha o VU Analogico
 (gfx_w < 500 || gfx_h < 250) ? (
-  // Fundo Vintage Bege
   gfx_r = 0.92; gfx_g = 0.91; gfx_b = 0.86; gfx_a = 1;
   gfx_rect(0, 0, gfx_w, gfx_h, 1);
-  
-  // Borda escura 3D (Bezel)
   gfx_r = 0.1; gfx_g = 0.1; gfx_b = 0.1; gfx_a = 0.5;
   gfx_rect(0, 0, gfx_w, gfx_h, 0);
   gfx_rect(1, 1, gfx_w-2, gfx_h-2, 0);
 
-  // Dimensoes dinamicas que se ajustam ao tamanho do TCP/MCP
   radius = min(gfx_w * 0.8, gfx_h * 0.8);
-  cx = gfx_w * 0.5;
-  cy = gfx_h * 0.85;
+  cx = gfx_w * 0.5; cy = gfx_h * 0.85;
 
-  // Desenha a Escala (Tracinhos)
   i = 0;
   loop(21,
     a = 0.7 - (i/20) * 1.4;
     len = (i % 5 == 0) ? radius * 0.15 : radius * 0.05;
-    
-    // Deixa os tracinhos vermelhos nas reducoes mais agressivas (lado esquerdo)
     i > 15 ? (gfx_r = 0.8; gfx_g = 0.2; gfx_b = 0.1; gfx_a = 1;) : (gfx_r = 0.2; gfx_g = 0.2; gfx_b = 0.2; gfx_a = 0.8;);
-    
-    px1 = cx + sin(a) * (radius - len);
-    py1 = cy - cos(a) * (radius - len);
-    px2 = cx + sin(a) * radius;
-    py2 = cy - cos(a) * radius;
-    
+    px1 = cx + sin(a) * (radius - len); py1 = cy - cos(a) * (radius - len);
+    px2 = cx + sin(a) * radius; py2 = cy - cos(a) * radius;
     gfx_line(px1, py1, px2, py2);
-    // Tracinhos mais grossos nos marcadores principais
-    (i % 5 == 0) ? (
-      gfx_line(px1+1, py1, px2+1, py2);
-      gfx_line(px1-1, py1, px2-1, py2);
-    );
+    (i % 5 == 0) ? ( gfx_line(px1+1, py1, px2+1, py2); gfx_line(px1-1, py1, px2-1, py2); );
     i += 1;
   );
   
-  // Texto "VU" no mostrador
   gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.3; gfx_a = 1;
   gfx_measurestr("VU", tw, th);
   gfx_x = cx - tw/2; gfx_y = cy - (radius * 0.45);
   gfx_drawstr("VU");
   
-  // Calcula angulo da agulha baseado na Reducao de Ganho real
   gr_norm = min(1, gr_meter / 24); 
   angle = 0.7 - (gr_norm * 1.4);
-  nx = cx + sin(angle) * (radius * 0.95);
-  ny = cy - cos(angle) * (radius * 0.95);
+  nx = cx + sin(angle) * (radius * 0.95); ny = cy - cos(angle) * (radius * 0.95);
   
-  // Sombra da Agulha
   gfx_r = 0; gfx_g = 0; gfx_b = 0; gfx_a = 0.2;
   gfx_triangle(cx-2, cy+2, cx+4, cy+2, nx+2, ny+2);
-  
-  // Agulha Preta
   gfx_a = 1; gfx_r = 0.1; gfx_g = 0.1; gfx_b = 0.1;
   gfx_triangle(cx-3, cy, cx+3, cy, nx, ny);
-  
-  // Parafuso / Pino central da agulha com reflexo
   gfx_r = 0.15; gfx_g = 0.15; gfx_b = 0.15;
   gfx_circle(cx, cy, 6, 1);
   gfx_r = 0.8; gfx_g = 0.8; gfx_b = 0.8;
   gfx_circle(cx-1, cy-1, 1.5, 1);
 
 ) : (
-
-  // ====================================================================
-  // --- INTERFACE PRINCIPAL (Quando aberto em janela cheia) ---
-  // ====================================================================
-
   gfx_r = 0.08; gfx_g = 0.09; gfx_b = 0.10; gfx_a = 1;
   gfx_rect(0, 0, gfx_w, gfx_h, 1);
 
@@ -226,16 +210,17 @@ gfx_getchar();
   sprintf(#gr_text, "-%.1f dB", gr_meter);
   gfx_drawstr(#gr_text);
 
-  x1 = 75; x2 = 205; x3 = 335; x4 = 465; x5 = 595;
+  x1 = 60; x2 = 180; x3 = 300; x4 = 420; x5 = 540; x6 = 660;
   y1 = 125; y2 = 245;
 
   slot_i = 0;
-  loop(10,
-    k_x = slot_i == 0 || slot_i == 5 ? x1 :
-          slot_i == 1 || slot_i == 6 ? x2 :
-          slot_i == 2 || slot_i == 7 ? x3 :
-          slot_i == 3 || slot_i == 8 ? x4 : x5;
-    k_y = slot_i < 5 ? y1 : y2;
+  loop(12,
+    k_x = slot_i % 6 == 0 ? x1 :
+          slot_i % 6 == 1 ? x2 :
+          slot_i % 6 == 2 ? x3 :
+          slot_i % 6 == 3 ? x4 :
+          slot_i % 6 == 4 ? x5 : x6;
+    k_y = slot_i < 6 ? y1 : y2;
 
     slot_i == 0 ? ( k_norm = (slider1 + 50) / 65; k_lbl = "THRESHOLD"; sprintf(#k_val, "%.1f dB", slider1); ) :
     slot_i == 1 ? ( k_lbl = "RATIO";
@@ -245,16 +230,18 @@ gfx_getchar();
                     slider2 == 3 ? strcpy(#k_val, "4:1") : strcpy(#k_val, "10:1"); ) :
     slot_i == 2 ? ( k_norm = (slider3 - 0.1) / 29.9; k_lbl = "ATTACK"; sprintf(#k_val, "%.1f ms", slider3); ) :
     slot_i == 3 ? ( k_norm = (slider4 - 0.05) / 2.95; k_lbl = "RELEASE"; sprintf(#k_val, "%.2f s", slider4); ) :
-    slot_i == 4 ? ( k_lbl = "AUTO REL"; slider5 > 0.5 ? strcpy(#k_val, "ON") : strcpy(#k_val, "OFF"); ) :
-    slot_i == 5 ? ( k_lbl = "KNEE";
-                    slider6 == 0 ? strcpy(#k_val, "Soft") :
-                    slider6 == 1 ? strcpy(#k_val, "Medium") : strcpy(#k_val, "Hard"); ) :
-    slot_i == 6 ? ( k_norm = slider7 / 100; k_lbl = "THRUST"; sprintf(#k_val, "%.0f %%", slider7); ) :
-    slot_i == 7 ? ( k_norm = slider8 / 24; k_lbl = "MAKEUP"; sprintf(#k_val, "%.1f dB", slider8); ) :
-    slot_i == 8 ? ( k_norm = slider9 / 100; k_lbl = "MIX"; sprintf(#k_val, "%.0f %%", slider9); ) :
-                  ( k_norm = slider10 / 100; k_lbl = "THD"; sprintf(#k_val, "%.0f %%", slider10); );
+    slot_i == 4 ? ( k_lbl = "AUTO REL"; slider5 > 0.5 ? strcpy(#k_val, "DUAL") : strcpy(#k_val, "OFF"); ) :
+    slot_i == 5 ? ( k_norm = slider6 / 100; k_lbl = "CREST"; sprintf(#k_val, "%.0f %%", slider6); ) :
+    slot_i == 6 ? ( k_lbl = "KNEE";
+                    slider7 == 0 ? strcpy(#k_val, "Soft") :
+                    slider7 == 1 ? strcpy(#k_val, "Medium") : strcpy(#k_val, "Hard"); ) :
+    slot_i == 7 ? ( k_norm = slider8 / 100; k_lbl = "THRUST"; sprintf(#k_val, "%.0f %%", slider8); ) :
+    slot_i == 8 ? ( k_norm = slider9 / 24; k_lbl = "MAKEUP"; sprintf(#k_val, "%.1f dB", slider9); ) :
+    slot_i == 9 ? ( k_norm = slider10 / 100; k_lbl = "MIX"; sprintf(#k_val, "%.0f %%", slider10); ) :
+    slot_i == 10 ? ( k_norm = slider11 / 100; k_lbl = "THD"; sprintf(#k_val, "%.0f %%", slider11); ) :
+                   ( k_norm = (slider12 + 18) / 36; k_lbl = "OUTPUT"; sprintf(#k_val, "%.1f dB", slider12); );
 
-    is_btn = (slot_i == 1 || slot_i == 4 || slot_i == 5);
+    is_btn = (slot_i == 1 || slot_i == 4 || slot_i == 6);
 
     is_btn ? (
       btn_w = 60; btn_h = 32;
@@ -274,8 +261,7 @@ gfx_getchar();
       gfx_x = k_x - lbl_w/2; gfx_y = k_y + 32;
       gfx_drawstr(k_lbl);
     ) : (
-      radius = 26;
-      angle = 2.356 + k_norm * 4.712;
+      radius = 26; angle = 2.356 + k_norm * 4.712;
 
       gfx_r = 0.16; gfx_g = 0.18; gfx_b = 0.20; gfx_a = 1;
       gfx_circle(k_x, k_y, radius, 1);
@@ -298,38 +284,32 @@ gfx_getchar();
       gfx_x = k_x - val_w/2; gfx_y = k_y + 45;
       gfx_drawstr(#k_val);
     );
-
     slot_i += 1;
   );
 
-  // --- LOGICA DE CLIQUE E ARRASTO ---
   mouse_down = (mouse_cap & 1) ? 1 : 0;
 
   mouse_down && last_mouse_cap == 0 ? (
     active_knob = -1; check_i = 0;
-    loop(10,
-      check_x = check_i == 0 || check_i == 5 ? x1 :
-                check_i == 1 || check_i == 6 ? x2 :
-                check_i == 2 || check_i == 7 ? x3 :
-                check_i == 3 || check_i == 8 ? x4 : x5;
-      check_y = check_i < 5 ? y1 : y2;
+    loop(12,
+      check_x = check_i % 6 == 0 ? x1 :
+                check_i % 6 == 1 ? x2 :
+                check_i % 6 == 2 ? x3 :
+                check_i % 6 == 3 ? x4 :
+                check_i % 6 == 4 ? x5 : x6;
+      check_y = check_i < 6 ? y1 : y2;
 
       abs(mouse_x - check_x) < 32 && abs(mouse_y - check_y) < 32 ? (
-        check_i == 1 ? (
-          slider2 = slider2 >= 4 ? 0 : slider2 + 1; slider_automate(slider2);
-        ) :
-        check_i == 4 ? (
-          slider5 = slider5 == 0 ? 1 : 0; slider_automate(slider5);
-        ) :
-        check_i == 5 ? (
-          slider6 = slider6 >= 2 ? 0 : slider6 + 1; slider_automate(slider6);
-        ) : (
+        check_i == 1 ? ( slider2 = slider2 >= 4 ? 0 : slider2 + 1; slider_automate(slider2); ) :
+        check_i == 4 ? ( slider5 = slider5 == 0 ? 1 : 0; slider_automate(slider5); ) :
+        check_i == 6 ? ( slider7 = slider7 >= 2 ? 0 : slider7 + 1; slider_automate(slider7); ) : (
           active_knob = check_i;
           start_mouse_y = mouse_y;
           start_val_0 = slider1; start_val_2 = slider3;
-          start_val_3 = slider4; start_val_6 = slider7;
-          start_val_7 = slider8; start_val_8 = slider9;
-          start_val_9 = slider10;
+          start_val_3 = slider4; start_val_5 = slider6;
+          start_val_7 = slider8; start_val_8 = slider9; 
+          start_val_9 = slider10; start_val_10 = slider11;
+          start_val_11 = slider12;
         );
       );
       check_i += 1;
@@ -343,28 +323,29 @@ gfx_getchar();
     active_knob == 0 ? ( slider1 = min(15, max(-50, start_val_0 + drag_dy * 65 * sens)); slider_automate(slider1); ) :
     active_knob == 2 ? ( slider3 = min(30, max(0.1, start_val_2 + drag_dy * 29.9 * sens)); slider_automate(slider3); ) :
     active_knob == 3 ? ( slider4 = min(3.0, max(0.05, start_val_3 + drag_dy * 2.95 * sens)); slider_automate(slider4); ) :
-    active_knob == 6 ? ( slider7 = min(100, max(0, floor(start_val_6 + drag_dy * 100 * sens + 0.5))); slider_automate(slider7); ) :
-    active_knob == 7 ? ( slider8 = min(24, max(0, start_val_7 + drag_dy * 24 * sens)); slider_automate(slider8); ) :
-    active_knob == 8 ? ( slider9 = min(100, max(0, floor(start_val_8 + drag_dy * 100 * sens + 0.5))); slider_automate(slider9); ) :
-    active_knob == 9 ? ( slider10 = min(100, max(0, floor(start_val_9 + drag_dy * 100 * sens + 0.5))); slider_automate(slider10); );
+    active_knob == 5 ? ( slider6 = min(100, max(0, floor(start_val_5 + drag_dy * 100 * sens + 0.5))); slider_automate(slider6); ) :
+    active_knob == 7 ? ( slider8 = min(100, max(0, floor(start_val_7 + drag_dy * 100 * sens + 0.5))); slider_automate(slider8); ) :
+    active_knob == 8 ? ( slider9 = min(24, max(0, start_val_8 + drag_dy * 24 * sens)); slider_automate(slider9); ) :
+    active_knob == 9 ? ( slider10 = min(100, max(0, floor(start_val_9 + drag_dy * 100 * sens + 0.5))); slider_automate(slider10); ) :
+    active_knob == 10 ? ( slider11 = min(100, max(0, floor(start_val_10 + drag_dy * 100 * sens + 0.5))); slider_automate(slider11); ) :
+    active_knob == 11 ? ( slider12 = min(18, max(-18, start_val_11 + drag_dy * 36 * sens)); slider_automate(slider12); );
   );
 
   mouse_down == 0 ? active_knob = -1;
   last_mouse_cap = mouse_down;
 
-  // --- LOGICA DO MOUSE WHEEL (SCROLL) ---
   mouse_wheel != 0 ? (
     check_i = 0;
-    loop(10,
-      check_x = check_i == 0 || check_i == 5 ? x1 :
-                check_i == 1 || check_i == 6 ? x2 :
-                check_i == 2 || check_i == 7 ? x3 :
-                check_i == 3 || check_i == 8 ? x4 : x5;
-      check_y = check_i < 5 ? y1 : y2;
+    loop(12,
+      check_x = check_i % 6 == 0 ? x1 :
+                check_i % 6 == 1 ? x2 :
+                check_i % 6 == 2 ? x3 :
+                check_i % 6 == 3 ? x4 :
+                check_i % 6 == 4 ? x5 : x6;
+      check_y = check_i < 6 ? y1 : y2;
 
       abs(mouse_x - check_x) < 32 && abs(mouse_y - check_y) < 32 ? (
-        is_btn = (check_i == 1 || check_i == 4 || check_i == 5);
-        
+        is_btn = (check_i == 1 || check_i == 4 || check_i == 6);
         is_btn == 0 ? (
           wheel_delta = mouse_wheel / 120;
           wheel_sens = (mouse_cap & 12) ? 0.005 : 0.025; 
@@ -372,14 +353,16 @@ gfx_getchar();
           check_i == 0 ? ( slider1 = min(15, max(-50, slider1 + wheel_delta * 65 * wheel_sens)); slider_automate(slider1); ) :
           check_i == 2 ? ( slider3 = min(30, max(0.1, slider3 + wheel_delta * 29.9 * wheel_sens)); slider_automate(slider3); ) :
           check_i == 3 ? ( slider4 = min(3.0, max(0.05, slider4 + wheel_delta * 2.95 * wheel_sens)); slider_automate(slider4); ) :
-          check_i == 6 ? ( slider7 = min(100, max(0, floor(slider7 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider7); ) :
-          check_i == 7 ? ( slider8 = min(24, max(0, slider8 + wheel_delta * 24 * wheel_sens)); slider_automate(slider8); ) :
-          check_i == 8 ? ( slider9 = min(100, max(0, floor(slider9 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider9); ) :
-          check_i == 9 ? ( slider10 = min(100, max(0, floor(slider10 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider10); );
+          check_i == 5 ? ( slider6 = min(100, max(0, floor(slider6 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider6); ) :
+          check_i == 7 ? ( slider8 = min(100, max(0, floor(slider8 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider8); ) :
+          check_i == 8 ? ( slider9 = min(24, max(0, slider9 + wheel_delta * 24 * wheel_sens)); slider_automate(slider9); ) :
+          check_i == 9 ? ( slider10 = min(100, max(0, floor(slider10 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider10); ) :
+          check_i == 10 ? ( slider11 = min(100, max(0, floor(slider11 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider11); ) :
+          check_i == 11 ? ( slider12 = min(18, max(-18, slider12 + wheel_delta * 36 * wheel_sens)); slider_automate(slider12); );
         );
       );
       check_i += 1;
     );
     mouse_wheel = 0; 
   );
-); // Fim do bloco if-else de tela
+);
