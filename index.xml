@@ -19,6 +19,7 @@ saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></descriptio
       </metadata>
       <version name="1.0" author="Jorge Araujo (SomBinário)" time="2026-08-22T04:10:00Z">
         <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_IronGrip.jsfx</source>
+        <source file="sb_knob.png">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/sb_knob.png</source>
       </version>
     </reapack>
   </category>
