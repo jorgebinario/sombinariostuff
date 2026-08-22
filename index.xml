@@ -11,5 +11,15 @@ saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></descriptio
         <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_VCA_Punch.jsfx</source>
       </version>
     </reapack>
+    
+    <reapack name="SomBinario_IronGrip.jsfx" type="effect" desc="SomBinario IronGrip">
+      <metadata>
+        <description><![CDATA[Plugin de saturação e modelagem dinâmica com controle de Drive, Bite e Ceiling, focado em punch e caráter analógico.]]></description>
+        <link rel="website">https://sombinario.com</link>
+      </metadata>
+      <version name="1.0" author="Jorge Araujo (SomBinário)" time="2026-08-22T04:10:00Z">
+        <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_IronGrip.jsfx</source>
+      </version>
+    </reapack>
   </category>
 </index>
