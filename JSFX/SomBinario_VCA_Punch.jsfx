@@ -1,9 +1,11 @@
 // @description SomBinario VCA Punch
 // @author Jorge Araujo (SomBinario)
-// @version 1.1.1
+// @version 1.2.0
 // @about
 //   Um Bus Compressor VCA hibrido com circuito Thrust integrado, 
 //   focado em 'glue', saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).
+//   v1.2.0: coeficientes do filtro Thrust e do medidor de GR agora sao
+//   independentes de sample rate (corrigido por Claude).
 // @links
 //   Website https://sombinario.com.BR
 // ------------------------------------------------------------------
@@ -52,6 +54,13 @@ release_coeff = exp(-1 / max(1, release_s * srate));
 auto_fast_coeff = exp(-1 / max(1, 0.04 * srate)); 
 detector_coeff = exp(-1 / max(1, 0.010 * srate));
 
+// --- Coeficientes independentes de sample rate (fix) ---
+// Filtro do sidechain "Thrust" (era fixo em 0.004, calibrado ~44.1kHz => ~5.6ms / ~28Hz)
+thrust_lp_coeff = 1 - exp(-1 / max(1, 0.0056 * srate));
+// Ballistics do medidor de GR (subida rapida, descida suave)
+gr_meter_rise = 1 - exp(-1 / max(1, 0.003 * srate));
+gr_meter_fall = 1 - exp(-1 / max(1, 0.05 * srate));
+
 thrust_linear = thrust_amount * 0.01;
 makeup_linear = pow(10, makeup_db / 20);
 mix_linear = mix_amount * 0.01;
@@ -66,7 +75,7 @@ input_r = spl1;
 // Anti-Denormal: Pequeno valor inaudivel para impedir ruidos e spikes de CPU
 sidechain = (abs(input_l) + abs(input_r)) * 0.5 + 0.000000001;
 
-sc_low += (sidechain - sc_low) * 0.004;
+sc_low += (sidechain - sc_low) * thrust_lp_coeff;
 sc_high = sidechain - sc_low;
 
 thrust_sidechain = sc_low * (1 - thrust_linear * 0.75) + sc_high * (1 + thrust_linear * 1.5);
@@ -115,7 +124,7 @@ target_gain < gain_smoothed ? (
 
 gr_db = max(0, -20 * log(max(0.0000001, gain_smoothed)) / log(10));
 
-gr_meter_coeff = gr_db > gr_meter ? 0.25 : 0.02;
+gr_meter_coeff = gr_db > gr_meter ? gr_meter_rise : gr_meter_fall;
 gr_meter += (gr_db - gr_meter) * gr_meter_coeff;
 
 ext_gr_meter = -gr_meter;
