@@ -1,4 +1,4 @@
-desc:SomBinario IronGrip (v1.0)
+desc:SomBinario IronGrip (v1.0.1)
 filename:0,sb_knob.png
 
 slider1:0<0,24,0.1>-Drive (dB)
@@ -8,6 +8,7 @@ slider3:100<0,100,1>-Softness (%)
 slider4:100<0,100,1>-Mix (%)
 slider5:0<0,3,1{Desligado,2x,4x,8x}>-Oversampling
 slider6:0<-60,24,0.1>-Output (dB)
+slider8:0<0,1,1{Desligado,Ligado}>-Auto Gain
 
 @init
 function tanh_seguro(x) local(e2x) (
@@ -131,10 +132,11 @@ new_os != os_factor || srate != last_srate ? (
     lp_l.f4_set(cutoff, srate * os_factor); 
     lp_r.f4_set(cutoff, srate * os_factor);
     
-    att_f = 1.0 - exp(-1.0 / (0.001 * srate)); 
+    att_f = 1.0 - exp(-1.0 / (0.0008 * srate)); 
     rel_f = 1.0 - exp(-1.0 / (0.015 * srate)); 
-    att_s = 1.0 - exp(-1.0 / (0.015 * srate)); 
+    att_s = 1.0 - exp(-1.0 / (0.014 * srate)); 
     rel_s = 1.0 - exp(-1.0 / (0.100 * srate)); 
+    rms_tc = 1.0 - exp(-1.0 / (0.3 * srate));
 );
 
 @sample
@@ -150,8 +152,8 @@ env_f_r += (abs_r > env_f_r ? att_f : rel_f) * (abs_r - env_f_r);
 env_s_r += (abs_r > env_s_r ? att_s : rel_s) * (abs_r - env_s_r);
 trans_r = max(env_f_r - env_s_r, 0.0);
 
-bite_gain_l = 1.0 + (trans_l * dyn_bite * 4.0); 
-bite_gain_r = 1.0 + (trans_r * dyn_bite * 4.0); 
+bite_gain_l = 1.0 + (trans_l * dyn_bite * 6.0); 
+bite_gain_r = 1.0 + (trans_r * dyn_bite * 6.0); 
 
 os_factor == 1 ? (
     in_l = spl0 * pre_gain;
@@ -191,8 +193,25 @@ out_r *= bite_gain_r;
 
 spl0 = (out_l * ceil_lin * mix_pct) + (dry_l * (1 - mix_pct));
 spl1 = (out_r * ceil_lin * mix_pct) + (dry_r * (1 - mix_pct));
-spl0 *= out_gain_lin; 
-spl1 *= out_gain_lin;
+
+// --- Auto Gain (RMS-matched): compara o sinal seco com o sinal real de
+// saida (janela ~300ms) e compensa o ganho pra igualar o volume percebido.
+ms_in_l += rms_tc * (dry_l*dry_l - ms_in_l);
+ms_in_r += rms_tc * (dry_r*dry_r - ms_in_r);
+ms_out_l += rms_tc * (spl0*spl0 - ms_out_l);
+ms_out_r += rms_tc * (spl1*spl1 - ms_out_r);
+
+slider8 >= 0.5 ? (
+    ms_in_avg = (ms_in_l + ms_in_r) * 0.5;
+    ms_out_avg = (ms_out_l + ms_out_r) * 0.5;
+    auto_gain_lin = sqrt(ms_in_avg / max(ms_out_avg, 0.0000001));
+    auto_gain_lin = min(max(auto_gain_lin, 0.25), 4.0);
+) : (
+    auto_gain_lin = 1.0;
+);
+
+spl0 *= out_gain_lin * auto_gain_lin; 
+spl1 *= out_gain_lin * auto_gain_lin;
 spl0 = min(max(spl0, -1.0), 1.0); 
 spl1 = min(max(spl1, -1.0), 1.0);
 
@@ -288,9 +307,26 @@ gfx_h < 250 ? (
     gfx_r=1; gfx_g=1; gfx_b=1;
     gfx_drawstr(os_text);
 
+    gfx_x = 400; gfx_y = 560;
+    gfx_r=0.6; gfx_g=0.6; gfx_b=0.6;
+    gfx_drawstr("Auto Gain: ");
+    slider8 >= 0.5 ? (
+        gfx_r=0.9; gfx_g=0.4; gfx_b=0.0;
+        gfx_drawstr("ON");
+    ) : (
+        gfx_r=0.6; gfx_g=0.6; gfx_b=0.6;
+        gfx_drawstr("OFF");
+    );
+
     mouse_cap == 1 && last_mouse_cap == 0 && mouse_x > 30 && mouse_x < 200 && mouse_y > 550 && mouse_y < 580 && active_knob == 0 ? (
         slider5 = (slider5 + 1) % 4; 
         sliderchange(16);
+        active_knob = 99; 
+    );
+
+    mouse_cap == 1 && last_mouse_cap == 0 && mouse_x > 400 && mouse_x < 570 && mouse_y > 550 && mouse_y < 580 && active_knob == 0 ? (
+        slider8 = slider8 >= 0.5 ? 0 : 1;
+        sliderchange(128);
         active_knob = 99; 
     );
 );
