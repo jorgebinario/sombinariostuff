@@ -1,0 +1,899 @@
+desc:SomBinario TubeGlow
+
+// ============================================================
+// SomBinário TubeGlow v1.0 - Saturador Valvulado Dinâmico
+// Autor: Jorge Araujo (SomBinário)
+//
+// INSTRUÇÕES DE INSTALAÇÃO:
+// Este plugin requer os seguintes arquivos de Impulse Response:
+// - 1.wav (captura @18dB)
+// - 2.wav (captura @40dB)
+// - 3.wav (captura @76dB)
+// Os três arquivos .wav DEVEM ser colocados na MESMA pasta 
+// deste arquivo .jsfx para que o plugin funcione corretamente.
+//
+// NOTAS TÉCNICAS:
+// Capturas originais realizadas a 48kHz. O plugin reamostra 
+// automaticamente as IRs para a sample rate nativa do projeto 
+// (44.1k, 48k, 96k, etc.) via interpolação linear.
+//
+// FLUXO DE SINAL:
+// Convolução (Estágio de Ganho) -> Tone Tilt -> Sag (Dinâmica) 
+// -> Curva de Saturação (Bias e 2nd Harm) -> Mix -> Output Trim.
+// ============================================================
+
+filename:0,1.wav
+filename:1,2.wav
+filename:2,3.wav
+
+slider1:drive_db=18<18,100,0.1>-Drive
+slider2:harmonics_pct=20<0,100,1>-2nd Harm (calor / 2º harmônico %)
+slider3:mix=100<0,100,1>-Mix (%)
+slider4:output_gain=0<-24,24,0.1>-Output Trim (dB)
+slider5:hd=1<0,1,1{Off,HD}>-Oversampling anti-alias (HD)
+slider6:tone_tilt=0<-100,100,1>-Tone Tilt (Escuro <-> Brilhante %)
+slider7:tube_bias=0<-100,100,1>-Bias (%)
+slider8:sag_amount=0<0,100,1>-Sag (%)
+
+@init
+
+RAWMAXLEN = 2048; // cap de leitura no arquivo original (48kHz), cobre a cauda das 3 IRs
+MAXLEN = floor(RAWMAXLEN * (srate/48000)) + 32; // buffer final, escalado pra sample rate do projeto
+
+ir1 = 100000;  memset(ir1, 0, MAXLEN);
+ir2 = 160000;  memset(ir2, 0, MAXLEN);
+ir3 = 220000;  memset(ir3, 0, MAXLEN);
+ir_active = 280000; memset(ir_active, 0, MAXLEN);
+
+histL = 340000; memset(histL, 0, MAXLEN*2); // canal esquerdo (buffer espelhado)
+histR = 900000; memset(histR, 0, MAXLEN*2); // canal direito (buffer espelhado)
+
+raw_buf = 450000; // scratch pra leitura do wav na taxa nativa do arquivo (reaproveitado pros 3 loads)
+
+// lê o wav bruto na taxa nativa do arquivo (definida pelo próprio header do wav,
+// via file_riff -> last_filesr). Não assume 48kHz "na marra": usa o valor real do arquivo.
+function load_ir_raw(idx, dest)
+  local(h, i, s0, s1)
+(
+  i = 0;
+  h = file_open(idx);
+  h >= 0 ? (
+    file_riff(h, last_nch, last_filesr);
+    while(i < RAWMAXLEN && file_avail(h) > 0) (
+      last_nch == 1 ? (
+        file_var(h, s0);
+        dest[i] = s0;
+      ) : (
+        file_var(h, s0);
+        file_var(h, s1);
+        dest[i] = (s0 + s1) * 0.5;
+      );
+      i += 1;
+    );
+    file_close(h);
+  );
+  i;
+);
+
+// acha o índice do pico (início real do impulso) - as capturas tem um
+// "pré-delay" de latência de loopback antes do pico, que não faz parte
+// do som real do preamp - cortamos pra não gastar taps de convolução à toa
+// e pra manter o tom limpo (acc) com o mínimo de atraso possível
+function find_peak_idx(buf, len)
+  local(i, mx, mi)
+(
+  mx = 0; mi = 0;
+  i = 0;
+  loop(len,
+    abs(buf[i]) > mx ? ( mx = abs(buf[i]); mi = i; );
+    i += 1;
+  );
+  mi;
+);
+
+// acha o último índice com conteúdo audível (acima de um limiar relativo
+// ao pico) - corta a cauda de silêncio/ruído residual que não contribui
+// pro som, economizando taps de convolução à toa
+function find_tail_idx(buf, len, peak_val, threshold_db)
+  local(i, thresh, last)
+(
+  thresh = peak_val * pow(10, threshold_db/20);
+  last = 0;
+  i = 0;
+  loop(len,
+    abs(buf[i]) > thresh ? last = i;
+    i += 1;
+  );
+  last;
+);
+
+TAIL_THRESHOLD_DB = -55; // corta abaixo disso (bem abaixo do ruído de fundo audível)
+TAIL_GUARD = 24; // margem de amostras depois do último ponto significativo
+
+PEAK_GUARD = 8; // margem de amostras antes do pico, preserva qualquer pré-ataque sutil
+
+// reamostra o IR bruto (na taxa do arquivo) pra taxa do projeto (srate), via interpolação linear
+function resample_ir(src_buf, src_len, file_sr, dest_buf)
+  local(ratio, dest_len, i, src_pos, i0, frac, s0, s1)
+(
+  ratio = srate / file_sr;
+  dest_len = floor(src_len * ratio);
+  dest_len > MAXLEN ? dest_len = MAXLEN;
+  dest_len < 1 ? dest_len = 1;
+  i = 0;
+  loop(dest_len,
+    src_pos = i / ratio;
+    i0 = floor(src_pos);
+    frac = src_pos - i0;
+    i0 >= src_len-1 ? (
+      s0 = src_buf[src_len-1];
+      s1 = src_buf[src_len-1];
+    ) : (
+      s0 = src_buf[i0];
+      s1 = src_buf[i0+1];
+    );
+    dest_buf[i] = s0 + (s1-s0)*frac;
+    i += 1;
+  );
+  dest_len;
+);
+
+// EEL2 nao tem tanh() nativo - implementamos via exp()
+function eel_tanh(x)
+  local(e2x)
+(
+  e2x = exp(2*x);
+  (e2x-1)/(e2x+1);
+);
+
+// recalcula todos os parâmetros derivados dos sliders (blend de IR, curva
+// de saturação, auto-gain, etc). Chamada tanto pelo @slider (quando o
+// REAPER muda um valor) quanto pela UI custom no @gfx (quando o usuário
+// arrasta um knob) - garante que os dois caminhos sempre atualizem tudo.
+function recalc_params()
+  local(drive_clamped, extra_norm)
+(
+  drive_lo  = 18;
+  drive_mid = 40;
+  drive_hi  = 76;
+  DRIVE_UI_MAX = 100; // topo do knob - além de 76 não temos captura real,
+                       // é extrapolação: a IR fica travada em 76dB, só a
+                       // curva de saturação continua empurrando
+
+  // a interpolação da IR usa só até 76dB (dado real) - acima disso, trava no ir3
+  drive_clamped = drive_db;
+  drive_clamped > drive_hi ? drive_clamped = drive_hi;
+
+  drive_clamped <= drive_mid ? (
+    a = ir1; b = ir2; len_a = len1; len_b = len2;
+    t = (drive_clamped - drive_lo) / (drive_mid - drive_lo);
+  ) : (
+    a = ir2; b = ir3; len_a = len2; len_b = len3;
+    t = (drive_clamped - drive_mid) / (drive_hi - drive_mid);
+  );
+  t < 0 ? t = 0;
+  t > 1 ? t = 1;
+
+  // irlen adaptado ao par realmente em uso agora - evita gastar CPU
+  // processando o tamanho da IR mais longa quando ela nem está ativa
+  irlen = max(len_a, len_b);
+  irlen > MAXLEN ? irlen = MAXLEN;
+  irlen < 1 ? irlen = 1;
+
+  i = 0;
+  loop(irlen,
+    ir_active[i] = a[i]*(1-t) + b[i]*t;
+    i += 1;
+  );
+
+  // até 76dB: exatamente a mesma curva de sempre (calibre preservado)
+  sat_norm = ((drive_clamped - drive_lo) / (drive_hi - drive_lo));
+  sat_norm = pow(sat_norm, 1.3);
+
+  // acima de 76dB: zona extra, só empurra a intensidade da saturação
+  drive_db > drive_hi ? (
+    extra_norm = (drive_db - drive_hi) / (DRIVE_UI_MAX - drive_hi);
+    extra_norm > 1 ? extra_norm = 1;
+    sat_norm += extra_norm * EXTRA_SAT_BOOST;
+  );
+
+  mix_norm = mix / 100;
+  out_lin  = pow(2, output_gain/6.0206);
+
+  // pre-calcula fatores de saturacao (so mudam quando slider muda)
+  drv  = 1 + sat_norm*8;
+  bias = (harmonics_pct/100) * 0.35; // limitado pra nao instabilizar a curva
+  tanh_drv_ref = eel_tanh(drv); // referencia de normalização (sem bias)
+
+  // ---- auto-gain: compensa o ganho "de graça" que a curva de saturação
+  // injeta em níveis médios conforme o Drive sobe (efeito tipo compressor).
+  // Aplica só no lado saturado do blend (ver @sample) - o lado limpo (IR pura)
+  // não precisa dessa compensação. ----
+  comp_shape = eel_tanh(drv*probe_amp) / tanh_drv_ref;
+  auto_gain = baseline_shape / max(comp_shape, 0.0001);
+
+  tilt_norm = tone_tilt / 100; // -1..1
+  bias_dc = (tube_bias/100) * BIAS_MAX;
+  sag_norm = sag_amount / 100;
+);
+
+// waveshaper com bias assimétrico (harmonics = bias PROPORCIONAL ao sinal,
+// gera 2º harmônico; bias_dc = deslocamento FIXO do ponto de operação,
+// tipo deriva de bias real de válvula - efeito diferente, mais "torto")
+function shape(x)
+  local(y)
+(
+  y = eel_tanh(drv * (x + bias*x*x) + bias_dc);
+  y;
+);
+
+// ---- funções de apoio da UI custom ----
+function pt_in_circle(mx, my, cx, cy, r)
+  local(dx, dy)
+(
+  dx = mx-cx; dy = my-cy;
+  (dx*dx + dy*dy) <= r*r;
+);
+
+function pt_in_rect(mx, my, rx, ry, rw, rh)
+(
+  mx >= rx && mx <= rx+rw && my >= ry && my <= ry+rh;
+);
+
+// retângulo com cantos arredondados (aproximado via corpo + círculos nos
+// cantos) - usa a cor atual (gfx_r/g/b/a), sem borda
+function draw_rrect(bx, by, bw, bh, rad)
+(
+  gfx_rect(bx+rad,by,bw-2*rad,bh,1);
+  gfx_rect(bx,by+rad,bw,bh-2*rad,1);
+  gfx_circle(bx+rad,by+rad,rad,1,1);
+  gfx_circle(bx+bw-rad,by+rad,rad,1,1);
+  gfx_circle(bx+rad,by+bh-rad,rad,1,1);
+  gfx_circle(bx+bw-rad,by+bh-rad,rad,1,1);
+);
+
+// painel sutil de agrupamento (2-3% mais claro que o fundo, sem borda)
+function draw_panel(bx, by, bw, bh)
+(
+  gfx_r=0.13; gfx_g=0.13; gfx_b=0.13; gfx_a=1;
+  draw_rrect(bx,by,bw,bh,10);
+);
+
+// anel de LEDs 8-bit ao redor do knob - aceso = laranja opaco, apagado =
+// laranja com alpha baixo (circuito "adormecido"), em vez de cinza escuro
+function draw_led_ring(kx, ky, kr, val01, hovered, nticks)
+  local(i, frac, ang, lit, bx, by)
+(
+  val01 < 0 ? val01 = 0;
+  val01 > 1 ? val01 = 1;
+  i = 0;
+  loop(nticks,
+    frac = nticks > 1 ? i/(nticks-1) : 0;
+    ang = KNOB_ANG_MIN + frac*(KNOB_ANG_MAX-KNOB_ANG_MIN);
+    lit = frac <= val01;
+    gfx_r=0.95; gfx_g=0.6; gfx_b=0.16;
+    lit ? ( gfx_a = hovered ? 1.0 : 0.9; ) : ( gfx_a = 0.13; );
+    bx = kx+kr*sin(ang); by = ky-kr*cos(ang);
+    gfx_rect(bx-3,by-3,6,6,1);
+    i += 1;
+  );
+  gfx_a = 1;
+);
+
+// corpo do knob: círculo liso e fosco, sem chanfro, com um ponteiro reto
+// simples indicando a posição - flat design
+function draw_knob_flat(kx, ky, kr, val01, hovered)
+  local(ang, br)
+(
+  val01 < 0 ? val01 = 0;
+  val01 > 1 ? val01 = 1;
+  br = kr - 12; // raio do corpo, menor que o anel de LED (que fica por fora)
+
+  gfx_r=0.17; gfx_g=0.17; gfx_b=0.18; gfx_a=1;
+  gfx_circle(kx,ky,br,1,1);
+
+  ang = KNOB_ANG_MIN + val01*(KNOB_ANG_MAX-KNOB_ANG_MIN);
+  gfx_r=0.8; gfx_g=0.8; gfx_b=0.82;
+  gfx_line(kx,ky, kx+(br-4)*sin(ang), ky-(br-4)*cos(ang), 1);
+  gfx_circle(kx+(br-4)*sin(ang), ky-(br-4)*cos(ang), 2, 1, 1);
+);
+
+// texto do knob: valor logo abaixo (branco, direto), label acima do anel
+// (cinza claro, discreto) - tipografia limpa, sem relevo/sombra
+function draw_knob_text(kx, ky, kr, label, valstr)
+(
+  gfx_r=0.6; gfx_g=0.6; gfx_b=0.62;
+  sprintf(#lbltxt, "%s", label);
+  gfx_x=kx-kr-10; gfx_y=ky-kr-22;
+  gfx_drawstr(#lbltxt, 1, kx+kr+10, ky-kr-6);
+
+  gfx_r=0.97; gfx_g=0.96; gfx_b=0.93;
+  gfx_x=kx-kr-10; gfx_y=ky+kr+8;
+  gfx_drawstr(valstr, 1, kx+kr+10, ky+kr+26);
+);
+
+// knob completo: LED ring + corpo flat + textos
+function draw_knob_block(kx, ky, kr, val01, hovered, label, valstr, nticks, bodysize)
+(
+  draw_led_ring(kx,ky,kr,val01,hovered,nticks);
+  draw_knob_flat(kx,ky,kr,val01,hovered);
+  draw_knob_text(kx,ky,kr,label,valstr);
+);
+
+// barra horizontal em blocos (Mix/Output) - flat, com alpha no estado apagado
+function draw_hbar(bx, by, bw, bh, val01, hovered, nblocks, label, valstr)
+  local(i, litcount, blockw, gap, lx)
+(
+  val01 < 0 ? val01 = 0;
+  val01 > 1 ? val01 = 1;
+
+  gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
+  sprintf(#hbartxt, "%s", label);
+  gfx_x=bx; gfx_y=by-18;
+  gfx_drawstr(#hbartxt);
+
+  gfx_r=0.97; gfx_g=0.96; gfx_b=0.93;
+  gfx_x=bx; gfx_y=by-18;
+  gfx_drawstr(valstr, 2, bx+bw, by-2);
+
+  litcount = floor(val01*nblocks+0.5);
+  gap=3;
+  blockw = (bw-(nblocks-1)*gap)/nblocks;
+  i=0;
+  loop(nblocks,
+    gfx_r=0.95; gfx_g=0.6; gfx_b=0.16;
+    i<litcount ? ( gfx_a = hovered?1.0:0.9; ) : ( gfx_a = 0.13; );
+    lx = bx+i*(blockw+gap);
+    gfx_rect(lx,by,blockw,bh,1);
+    i += 1;
+  );
+  gfx_a = 1;
+);
+
+// medidor de blocos (Sag Gain Reduction) - flat, mesma linguagem de alpha
+function draw_sat_meter(ccx, ccy, w, h, val01, nblocks)
+  local(i, litcount, blockw, gap, lx)
+(
+  val01 < 0 ? val01 = 0;
+  val01 > 1 ? val01 = 1;
+
+  litcount = floor(val01*nblocks+0.5);
+  gap=3;
+  blockw = (w-(nblocks-1)*gap)/nblocks;
+  i=0;
+  loop(nblocks,
+    gfx_r=0.95; gfx_g=0.6; gfx_b=0.16;
+    i<litcount ? ( gfx_a = 1.0; ) : ( gfx_a = 0.13; );
+    lx = ccx-w/2+i*(blockw+gap);
+    gfx_rect(lx,ccy,blockw,h,1);
+    i += 1;
+  );
+  gfx_a = 1;
+);
+
+// título de módulo (sem caixa/borda - só texto sutil sobre o painel)
+function draw_module_box(bx, by, bw, bh, title)
+(
+  gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
+  sprintf(#modtxt, "%s", title);
+  gfx_x=bx; gfx_y=by+10;
+  gfx_drawstr(#modtxt, 1, bx+bw, by+26);
+);
+
+// logo - texto limpo sobre painel sutil, sem borda dupla
+function draw_logo_box(bx, by, bw, bh)
+(
+  gfx_r=0.13; gfx_g=0.13; gfx_b=0.13; gfx_a=1;
+  draw_rrect(bx,by,bw,bh,10);
+
+  sprintf(#logotxt, "SOMBINARIO TUBEGLOW");
+  gfx_r=0.95; gfx_g=0.62; gfx_b=0.18;
+  gfx_x = bx; gfx_y = by;
+  gfx_drawstr(#logotxt, 1|4, bx+bw, by+bh);
+);
+
+// botão HD - flat, painel sutil quando desligado, preenchimento sólido
+// verde quando ligado (cor secundária de destaque)
+function draw_hd_button(bx, by, bw, bh, on, hovered)
+(
+  on ? (
+    gfx_r=0.24; gfx_g=0.78; gfx_b=0.36; gfx_a=1;
+  ) : (
+    gfx_r=0.13; gfx_g=0.13; gfx_b=0.13; gfx_a=1;
+  );
+  draw_rrect(bx,by,bw,bh,8);
+
+  on ? ( gfx_r=0.08; gfx_g=0.1; gfx_b=0.08; ) : ( gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; );
+  sprintf(#hdtxt, "HD");
+  gfx_x=bx; gfx_y=by;
+  gfx_drawstr(#hdtxt, 1|4, bx+bw, by+bh);
+);
+
+probe_amp = 0.3; // nivel "tipico" de referencia (~-10.5dBFS) usado pro calculo do auto-gain
+baseline_shape = eel_tanh(1*probe_amp) / eel_tanh(1); // resposta da curva no Drive minimo (drv=1)
+EXTRA_SAT_BOOST = 0.6; // o quanto a saturação ainda pode crescer entre 76-100dB (zona extrapolada)
+
+// ---- filtro de decimação pro oversampling 2x (anti-alias de verdade) ----
+// FIR windowed-sinc (janela Hamming), corte em 0.25 (normalizado pra taxa
+// 2x, ou seja, exatamente no Nyquist original) - substitui a média simples
+// que tínhamos antes por uma rejeição de imagem/alias muito melhor.
+PI_CONST = 3.14159265358979;
+
+// ---- UI custom: ângulos do knob (270° de varredura, padrão de DAW) e
+// estado de arrastar/hover do mouse ----
+KNOB_ANG_MIN = -135 * PI_CONST/180;
+KNOB_ANG_MAX = 135 * PI_CONST/180;
+drag_knob = 0; // 0 = nenhum, 1-7 = índice do knob sendo arrastado
+drag_start_y = 0;
+drag_start_val = 0;
+prev_left_down = 0;
+last_click_target = 0; // pra detectar duplo clique (reset pro padrão)
+last_click_time = 0;
+OS_N = 9; // taps do filtro (ímpar, fase linear tipo I -> atraso de grupo inteiro)
+OS_CENTER = floor((OS_N-1)/2); // = 4
+OS_FC = 0.25;
+
+os_h = 600000;
+os_sum = 0;
+i = 0;
+loop(OS_N,
+  m = i - OS_CENTER;
+  m == 0 ? (
+    hv = 2*OS_FC;
+  ) : (
+    hv = sin(2*PI_CONST*OS_FC*m) / (PI_CONST*m);
+  );
+  wv = 0.54 - 0.46*cos(2*PI_CONST*i/(OS_N-1));
+  os_h[i] = hv*wv;
+  os_sum += os_h[i];
+  i += 1;
+);
+i = 0;
+loop(OS_N, os_h[i] /= os_sum; i += 1;); // normaliza ganho unitário em DC
+
+osbufL = 610000; memset(osbufL, 0, OS_N);
+osbufR = 700000; memset(osbufR, 0, OS_N);
+os_wpos = 0; // compartilhado - L e R sempre avançam juntos, em lockstep
+
+// atraso de grupo do filtro de decimação: OS_CENTER ticks oversampled
+// = OS_CENTER/2 amostras na taxa original. Atrasamos o lado "limpo" do
+// Mix pelo mesmo tanto, pra continuar alinhado em fase com o lado saturado.
+OS_DELAY_SAMPLES = floor(OS_CENTER/2);
+OS_DELAY_SAMPLES < 1 ? OS_DELAY_SAMPLES = 1;
+acc_delay_buf_L = 620000; memset(acc_delay_buf_L, 0, OS_DELAY_SAMPLES);
+acc_delay_buf_R = 710000; memset(acc_delay_buf_R, 0, OS_DELAY_SAMPLES);
+adly_wpos = 0;
+pdc_delay = OS_DELAY_SAMPLES; // avisa o REAPER pra compensar essa latência
+
+// buffer de delay pro caminho SEM oversampling (HD desligado) - mantém a
+// mesma latência total independente do HD, pra não dar clique ao alternar
+wet_delay_buf_L = 630000; memset(wet_delay_buf_L, 0, OS_DELAY_SAMPLES);
+wet_delay_buf_R = 720000; memset(wet_delay_buf_R, 0, OS_DELAY_SAMPLES);
+wdly_wpos = 0;
+
+len1 = load_ir_raw(0, raw_buf);
+peak1 = find_peak_idx(raw_buf, len1);
+peakval1 = abs(raw_buf[peak1]);
+trim1 = peak1 - PEAK_GUARD; trim1 < 0 ? trim1 = 0;
+tail1 = find_tail_idx(raw_buf, len1, peakval1, TAIL_THRESHOLD_DB) + TAIL_GUARD;
+tail1 > len1 ? tail1 = len1;
+seg1 = tail1 - trim1; seg1 < 1 ? seg1 = 1;
+len1 = resample_ir(raw_buf+trim1, seg1, last_filesr, ir1);
+
+len2 = load_ir_raw(1, raw_buf);
+peak2 = find_peak_idx(raw_buf, len2);
+peakval2 = abs(raw_buf[peak2]);
+trim2 = peak2 - PEAK_GUARD; trim2 < 0 ? trim2 = 0;
+tail2 = find_tail_idx(raw_buf, len2, peakval2, TAIL_THRESHOLD_DB) + TAIL_GUARD;
+tail2 > len2 ? tail2 = len2;
+seg2 = tail2 - trim2; seg2 < 1 ? seg2 = 1;
+len2 = resample_ir(raw_buf+trim2, seg2, last_filesr, ir2);
+
+len3 = load_ir_raw(2, raw_buf);
+peak3 = find_peak_idx(raw_buf, len3);
+peakval3 = abs(raw_buf[peak3]);
+trim3 = peak3 - PEAK_GUARD; trim3 < 0 ? trim3 = 0;
+tail3 = find_tail_idx(raw_buf, len3, peakval3, TAIL_THRESHOLD_DB) + TAIL_GUARD;
+tail3 > len3 ? tail3 = len3;
+seg3 = tail3 - trim3; seg3 < 1 ? seg3 = 1;
+len3 = resample_ir(raw_buf+trim3, seg3, last_filesr, ir3);
+
+// se algum arquivo não carregou (len==0), avisa via variável de status
+load_ok = (len1 > 0) && (len2 > 0) && (len3 > 0);
+
+irlen = max(len1, max(len2, len3)); // valor inicial de segurança (recalculado no @slider)
+irlen > MAXLEN ? irlen = MAXLEN;
+irlen <= 0 ? irlen = 1;
+
+wpos = 0;
+
+// estado da saturação (oversampling + DC blocker) - separado por canal
+dc_x1_L = 0; dc_y1_L = 0;
+dc_x1_R = 0; dc_y1_R = 0;
+dc_r = 0.9995; // fator do DC blocker (quanto mais perto de 1, mais sutil)
+
+// ---- Tone Tilt: filtro tilt de 1 polo, pivô em ~700Hz. Inclina o
+// espectro que entra na saturação (não afeta o lado "limpo" do Mix) ----
+// Estado separado por canal, pra preservar a imagem estéreo.
+TILT_FC = 700; // Hz, ponto de pivô (grave desce enquanto agudo sobe, ou vice-versa)
+TILT_DEPTH = 1.3; // profundidade máxima do efeito
+tilt_a = exp(-2*PI_CONST*TILT_FC/srate);
+tilt_lp_L = 0;
+tilt_lp_R = 0;
+
+// ---- Bias: deslocamento fixo do ponto de operação da curva ----
+BIAS_MAX = 0.4; // deslocamento máximo (em amplitude normalizada)
+
+// ---- Sag: compressão suave dependente do programa, tipo fonte de
+// válvula cedendo sob transiente forte, recuperando devagar depois.
+// Detecção LINKADA entre L/R (envelope compartilhado) - evita que o
+// sag mude o balanço estéreo sob transiente assimétrico. ----
+SAG_ATTACK_MS = 15;
+SAG_RELEASE_MS = 250;
+SAG_DEPTH = 0.6; // redução máxima de ganho (fração) com sag=100% e sinal full-scale
+SAG_SENSITIVITY = 6; // calibrado pra reagir bem em níveis típicos de mixagem
+                      // (~-18dBFS ≈ 0.126 de amplitude), não só em 0dBFS
+sag_attack_coef = exp(-1/(0.001*SAG_ATTACK_MS*srate));
+sag_release_coef = exp(-1/(0.001*SAG_RELEASE_MS*srate));
+sag_env = 0;
+
+sagged_prev_L = 0; // guarda o sinal já processado (tilt+sag) da amostra anterior, por canal
+sagged_prev_R = 0;
+
+recalc_params(); // garante que o primeiro sample processado já sai com os parâmetros certos
+
+@slider
+
+recalc_params();
+
+@sample
+
+// ---- convolução: L e R independentes, mesmo IR/coeficientes pros dois ----
+histL[wpos] = spl0; histL[wpos+MAXLEN] = spl0; // espelha no segundo bloco do buffer
+histR[wpos] = spl1; histR[wpos+MAXLEN] = spl1;
+
+accL = 0; accR = 0;
+k = 0;
+base = wpos + MAXLEN;
+loop(irlen,
+  c = ir_active[k];
+  accL += c * histL[base-k];
+  accR += c * histR[base-k];
+  k += 1;
+);
+
+wpos += 1;
+wpos >= MAXLEN ? wpos = 0;
+
+// ---- Tone Tilt: inclina o espectro que vai entrar na saturação (por canal) ----
+tilt_lp_L = tilt_lp_L + (1-tilt_a)*(accL - tilt_lp_L);
+tilt_hp_L = accL - tilt_lp_L;
+tiltedL = accL + tilt_norm*TILT_DEPTH*(tilt_hp_L - tilt_lp_L);
+
+tilt_lp_R = tilt_lp_R + (1-tilt_a)*(accR - tilt_lp_R);
+tilt_hp_R = accR - tilt_lp_R;
+tiltedR = accR + tilt_norm*TILT_DEPTH*(tilt_hp_R - tilt_lp_R);
+
+// ---- Sag: envelope LINKADO (detecção compartilhada L/R) - preserva o
+// balanço estéreo sob transiente, aplicando a mesma redução aos dois canais.
+// Sensibilidade calibrada pra reagir em níveis reais de mixagem (não só
+// em sinal full-scale). ----
+sag_target = max(abs(tiltedL), abs(tiltedR)) * SAG_SENSITIVITY;
+sag_target > 1.5 ? sag_target = 1.5; // teto de segurança pra transientes muito quentes
+sag_target > sag_env ? (
+  sag_env = sag_attack_coef*sag_env + (1-sag_attack_coef)*sag_target;
+) : (
+  sag_env = sag_release_coef*sag_env + (1-sag_release_coef)*sag_target;
+);
+sag_reduction = 1 - sag_norm*sag_env*SAG_DEPTH;
+sag_reduction < 0.3 ? sag_reduction = 0.3; // piso de segurança
+
+saggedL = tiltedL * sag_reduction;
+saggedR = tiltedR * sag_reduction;
+
+// ---- saturação: HD ligado = oversampling 2x real (FIR anti-alias) /
+// HD desligado = processamento direto, mais barato, sem anti-aliasing.
+// Processado por canal, com os mesmos coeficientes/parâmetros pros dois. ----
+hd_on = hd > 0.5;
+
+hd_on ? (
+  mid_L = (sagged_prev_L + saggedL) * 0.5;
+  mid_R = (sagged_prev_R + saggedR) * 0.5;
+
+  wetL_a = shape(mid_L);
+  wetL_b = shape(saggedL);
+  wetR_a = shape(mid_R);
+  wetR_b = shape(saggedR);
+
+  // empurra os dois ticks oversampled nos buffers circulares (mesma
+  // posição pros dois canais, já que L e R sempre avançam em lockstep)
+  osbufL[os_wpos] = wetL_a; osbufR[os_wpos] = wetR_a;
+  os_wpos += 1; os_wpos >= OS_N ? os_wpos = 0;
+  osbufL[os_wpos] = wetL_b; osbufR[os_wpos] = wetR_b;
+  os_wpos += 1; os_wpos >= OS_N ? os_wpos = 0;
+
+  // convolução do FIR de decimação sobre o histórico oversampled (por canal)
+  firsumL = 0; firsumR = 0;
+  k = 0;
+  loop(OS_N,
+    idx = os_wpos-1-k;
+    idx < 0 ? idx += OS_N;
+    ch = os_h[k];
+    firsumL += ch*osbufL[idx];
+    firsumR += ch*osbufR[idx];
+    k += 1;
+  );
+  wet_raw_L = firsumL;
+  wet_raw_R = firsumR;
+) : (
+  // caminho direto (sem oversampling) - ainda passa pelo mesmo delay de
+  // OS_DELAY_SAMPLES, só pra manter a mesma latência total do HD ligado
+  // (evita clique/salto de alinhamento ao alternar o botão)
+  wet_raw_L = wet_delay_buf_L[wdly_wpos];
+  wet_delay_buf_L[wdly_wpos] = shape(saggedL);
+  wet_raw_R = wet_delay_buf_R[wdly_wpos];
+  wet_delay_buf_R[wdly_wpos] = shape(saggedR);
+  wdly_wpos += 1;
+  wdly_wpos >= OS_DELAY_SAMPLES ? wdly_wpos = 0;
+);
+
+wet_sat_L = wet_raw_L / tanh_drv_ref;
+wet_sat_R = wet_raw_R / tanh_drv_ref;
+
+sagged_prev_L = saggedL;
+sagged_prev_R = saggedR;
+
+// ---- DC blocker (remove offset introduzido pela curva assimétrica), por canal ----
+dc_y_L = wet_sat_L - dc_x1_L + dc_r*dc_y1_L;
+dc_x1_L = wet_sat_L; dc_y1_L = dc_y_L; wet_sat_L = dc_y_L;
+
+dc_y_R = wet_sat_R - dc_x1_R + dc_r*dc_y1_R;
+dc_x1_R = wet_sat_R; dc_y1_R = dc_y_R; wet_sat_R = dc_y_R;
+
+wet_sat_L *= auto_gain;
+wet_sat_R *= auto_gain;
+
+// atrasa o lado "limpo" (por canal) pra alinhar com o atraso de grupo do
+// filtro de decimação (senão reabre o problema de comb filtering no Mix)
+acc_clean_L = acc_delay_buf_L[adly_wpos];
+acc_delay_buf_L[adly_wpos] = accL;
+acc_clean_R = acc_delay_buf_R[adly_wpos];
+acc_delay_buf_R[adly_wpos] = accR;
+adly_wpos += 1;
+adly_wpos >= OS_DELAY_SAMPLES ? adly_wpos = 0;
+
+// Mix: tom limpo (acc_clean, só convolução, alinhado em fase) <-> tom
+// saturado (wet_sat). Estéreo real - cada canal com seu próprio caminho.
+final_L = acc_clean_L*(1-mix_norm) + wet_sat_L*mix_norm;
+final_R = acc_clean_R*(1-mix_norm) + wet_sat_R*mix_norm;
+final_L *= out_lin;
+final_R *= out_lin;
+
+spl0 = final_L;
+spl1 = final_R;
+
+@gfx 600 420
+
+// trava a fonte explicitamente - sem isso, gfx_measurestr pode medir
+// diferente do que gfx_drawstr realmente desenha, descentralizando texto
+gfx_setfont(1, "Arial", 15);
+
+// ---- fundo: dark mode sólido e liso ----
+gfx_r=0.10; gfx_g=0.10; gfx_b=0.10; gfx_a=1;
+gfx_rect(0,0,600,420,1);
+
+// ---- estado do mouse (uma vez por frame) ----
+left_down = (mouse_cap&1) != 0;
+just_pressed = left_down && !prev_left_down;
+shift_held = (mouse_cap&8) != 0;
+
+// ---- painéis de agrupamento sutis (fundo 3% mais claro, sem borda) ----
+PANEL_TOP = 50; PANEL_H = 278;
+draw_panel(15,PANEL_TOP,170,PANEL_H);   // esquerda: TONE SHAPING
+draw_panel(200,PANEL_TOP,200,PANEL_H);  // centro: DRIVE
+draw_panel(415,PANEL_TOP,170,PANEL_H);  // direita: TUBE DYNAMICS
+
+// ---- posições: knobs (Drive gigante no centro, os outros nos módulos) ----
+KY_TOP = 138; KY_BOT = 258;
+kx_drive = 300; ky_drive = 157; kr_drive = 65;
+kx_harm  = 100; ky_harm  = KY_TOP; kr_side = 30;
+kx_tilt  = 100; ky_tilt  = KY_BOT;
+kx_bias  = 500; ky_bias  = KY_TOP;
+kx_sag   = 500; ky_sag   = KY_BOT;
+
+// ---- posições: barras horizontais (Mix/Output no rodapé) ----
+mix_bx=20; mix_by=365; mix_bw=270; mix_bh=22;
+out_bx=310; out_by=365; out_bw=270; out_bh=22;
+
+// ---- botão HD ----
+hd_bx=515; hd_by=10; hd_bw=70; hd_bh=28;
+
+// ---- detecta clique (transição de botão) - Alt+clique ou duplo clique
+// reseta o controle pro padrão; clique normal inicia o arraste ----
+alt_held = (mouse_cap&16) != 0;
+
+just_pressed ? (
+  target_id = 0;
+  pt_in_circle(mouse_x,mouse_y,kx_drive,ky_drive,kr_drive) ? target_id = 1;
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,kx_harm,ky_harm,kr_side) ? target_id = 2;
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,kx_tilt,ky_tilt,kr_side) ? target_id = 3;
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,kx_bias,ky_bias,kr_side) ? target_id = 4;
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,kx_sag,ky_sag,kr_side) ? target_id = 5;
+  target_id==0 && pt_in_rect(mouse_x,mouse_y,mix_bx,mix_by,mix_bw,mix_bh) ? target_id = 6;
+  target_id==0 && pt_in_rect(mouse_x,mouse_y,out_bx,out_by,out_bw,out_bh) ? target_id = 7;
+
+  target_id != 0 ? (
+    is_dblclick = (target_id == last_click_target) && (time_precise()-last_click_time < 0.35);
+
+    (alt_held || is_dblclick) ? (
+      // reseta pro valor padrão, não inicia arraste
+      target_id==1 ? ( drive_db = 18; slider_automate(drive_db); );
+      target_id==2 ? ( harmonics_pct = 20; slider_automate(harmonics_pct); );
+      target_id==3 ? ( tone_tilt = 0; slider_automate(tone_tilt); );
+      target_id==4 ? ( tube_bias = 0; slider_automate(tube_bias); );
+      target_id==5 ? ( sag_amount = 0; slider_automate(sag_amount); );
+      target_id==6 ? ( mix = 100; slider_automate(mix); );
+      target_id==7 ? ( output_gain = 0; slider_automate(output_gain); );
+      recalc_params();
+      drag_knob = 0;
+    ) : (
+      drag_knob = target_id;
+      drag_start_y = mouse_y;
+      target_id==1 ? drag_start_val = (drive_db-18)/(100-18);
+      target_id==2 ? drag_start_val = harmonics_pct/100;
+      target_id==3 ? drag_start_val = (tone_tilt+100)/200;
+      target_id==4 ? drag_start_val = (tube_bias+100)/200;
+      target_id==5 ? drag_start_val = sag_amount/100;
+    );
+
+    last_click_target = target_id;
+    last_click_time = time_precise();
+  ) : (
+    drag_knob = 0;
+    pt_in_rect(mouse_x,mouse_y,hd_bx,hd_by,hd_bw,hd_bh) ? (
+      hd = hd>0.5 ? 0 : 1;
+      slider_automate(hd);
+    );
+  );
+);
+
+// ---- scroll do mouse: ajusta o valor em pequenos incrementos, sem
+// precisar clicar - funciona em qualquer controle sob o cursor ----
+mouse_wheel != 0 ? (
+  wheel_notches = mouse_wheel / 120;
+  mouse_wheel = 0; // consome o evento
+
+  pt_in_circle(mouse_x,mouse_y,kx_drive,ky_drive,kr_drive) ? (
+    drive_db += wheel_notches*1.0;
+    drive_db<18?drive_db=18; drive_db>100?drive_db=100;
+    slider_automate(drive_db); recalc_params();
+  );
+  pt_in_circle(mouse_x,mouse_y,kx_harm,ky_harm,kr_side) ? (
+    harmonics_pct += wheel_notches*2;
+    harmonics_pct<0?harmonics_pct=0; harmonics_pct>100?harmonics_pct=100;
+    slider_automate(harmonics_pct); recalc_params();
+  );
+  pt_in_circle(mouse_x,mouse_y,kx_tilt,ky_tilt,kr_side) ? (
+    tone_tilt += wheel_notches*2;
+    tone_tilt<-100?tone_tilt=-100; tone_tilt>100?tone_tilt=100;
+    slider_automate(tone_tilt); recalc_params();
+  );
+  pt_in_circle(mouse_x,mouse_y,kx_bias,ky_bias,kr_side) ? (
+    tube_bias += wheel_notches*2;
+    tube_bias<-100?tube_bias=-100; tube_bias>100?tube_bias=100;
+    slider_automate(tube_bias); recalc_params();
+  );
+  pt_in_circle(mouse_x,mouse_y,kx_sag,ky_sag,kr_side) ? (
+    sag_amount += wheel_notches*2;
+    sag_amount<0?sag_amount=0; sag_amount>100?sag_amount=100;
+    slider_automate(sag_amount); recalc_params();
+  );
+  pt_in_rect(mouse_x,mouse_y,mix_bx,mix_by,mix_bw,mix_bh) ? (
+    mix += wheel_notches*2;
+    mix<0?mix=0; mix>100?mix=100;
+    slider_automate(mix); recalc_params();
+  );
+  pt_in_rect(mouse_x,mouse_y,out_bx,out_by,out_bw,out_bh) ? (
+    output_gain += wheel_notches*0.5;
+    output_gain<-24?output_gain=-24; output_gain>24?output_gain=24;
+    slider_automate(output_gain); recalc_params();
+  );
+);
+
+// ---- atualiza o valor do controle sendo arrastado ----
+(left_down && drag_knob != 0) ? (
+  drag_knob <= 5 ? (
+    // knobs: arraste vertical relativo
+    sens = shift_held ? 800 : 200;
+    newval01 = drag_start_val + (drag_start_y-mouse_y)/sens;
+    newval01 < 0 ? newval01 = 0;
+    newval01 > 1 ? newval01 = 1;
+    drag_knob==1 ? ( drive_db = 18+newval01*(100-18); slider_automate(drive_db); );
+    drag_knob==2 ? ( harmonics_pct = newval01*100; slider_automate(harmonics_pct); );
+    drag_knob==3 ? ( tone_tilt = -100+newval01*200; slider_automate(tone_tilt); );
+    drag_knob==4 ? ( tube_bias = -100+newval01*200; slider_automate(tube_bias); );
+    drag_knob==5 ? ( sag_amount = newval01*100; slider_automate(sag_amount); );
+    recalc_params(); // garante que a UI custom recalcula tudo, sem depender do host chamar @slider
+  ) : (
+    // barras: posição horizontal direta
+    drag_knob==6 ? (
+      bval01 = (mouse_x-mix_bx)/mix_bw;
+      bval01<0?bval01=0; bval01>1?bval01=1;
+      mix = bval01*100; slider_automate(mix);
+    );
+    drag_knob==7 ? (
+      bval01 = (mouse_x-out_bx)/out_bw;
+      bval01<0?bval01=0; bval01>1?bval01=1;
+      output_gain = -24+bval01*48; slider_automate(output_gain);
+    );
+    recalc_params();
+  );
+);
+
+!left_down ? drag_knob = 0;
+prev_left_down = left_down;
+
+// ---- hover ----
+hov_drive = pt_in_circle(mouse_x,mouse_y,kx_drive,ky_drive,kr_drive);
+hov_harm  = pt_in_circle(mouse_x,mouse_y,kx_harm,ky_harm,kr_side);
+hov_tilt  = pt_in_circle(mouse_x,mouse_y,kx_tilt,ky_tilt,kr_side);
+hov_bias  = pt_in_circle(mouse_x,mouse_y,kx_bias,ky_bias,kr_side);
+hov_sag   = pt_in_circle(mouse_x,mouse_y,kx_sag,ky_sag,kr_side);
+hov_mix   = pt_in_rect(mouse_x,mouse_y,mix_bx,mix_by,mix_bw,mix_bh);
+hov_out   = pt_in_rect(mouse_x,mouse_y,out_bx,out_by,out_bw,out_bh);
+
+// ---- logo (centralizado horizontalmente na tela, painel sutil) ----
+draw_logo_box(170,10,260,28);
+
+// ---- botão HD (canto superior direito) ----
+draw_hd_button(hd_bx,hd_by,hd_bw,hd_bh, hd>0.5, pt_in_rect(mouse_x,mouse_y,hd_bx,hd_by,hd_bw,hd_bh));
+
+// ---- módulo esquerdo: TONE SHAPING (Harmonics + Tilt) ----
+draw_module_box(15,PANEL_TOP,170,PANEL_H,"TONE SHAPING");
+sprintf(#v2,"%.0f%%",harmonics_pct);
+draw_knob_block(kx_harm,ky_harm,kr_side,harmonics_pct/100,hov_harm,"2ND HARM",#v2,16,38);
+sprintf(#v3,"%.0f%%",tone_tilt);
+draw_knob_block(kx_tilt,ky_tilt,kr_side,(tone_tilt+100)/200,hov_tilt,"TILT",#v3,16,38);
+
+// ---- módulo direito: TUBE DYNAMICS (Bias + Sag) ----
+draw_module_box(415,PANEL_TOP,170,PANEL_H,"TUBE DYNAMICS");
+sprintf(#v4,"%.0f%%",tube_bias);
+draw_knob_block(kx_bias,ky_bias,kr_side,(tube_bias+100)/200,hov_bias,"BIAS",#v4,16,38);
+sprintf(#v5,"%.0f%%",sag_amount);
+draw_knob_block(kx_sag,ky_sag,kr_side,sag_amount/100,hov_sag,"SAG",#v5,16,38);
+
+// ---- centro: DRIVE gigante + medidor de Redução de Ganho (Sag) abaixo ----
+sprintf(#v1,"%.0f dB",drive_db);
+drive_norm = (drive_db-18)/(100-18);
+draw_knob_block(kx_drive,ky_drive,kr_drive,drive_norm,hov_drive,"DRIVE",#v1,28,60);
+
+// leitura em tempo real da redução de ganho aplicada pelo Sag
+// (sag_reduction vai de 1.0 = sem redução até 0.3 = redução máxima)
+gr_norm = (1 - sag_reduction) / 0.7;
+gr_norm < 0 ? gr_norm = 0;
+gr_norm > 1 ? gr_norm = 1;
+
+gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
+sprintf(#grlbl, "SAG GAIN REDUCTION");
+gfx_x = kx_drive-90; gfx_y = PANEL_TOP+214;
+gfx_drawstr(#grlbl, 1, kx_drive+90, PANEL_TOP+230);
+
+draw_sat_meter(kx_drive,PANEL_TOP+236,170,16,gr_norm,10);
+
+// ---- rodapé: barras Mix / Output ----
+sprintf(#vmix,"%.0f%%",mix);
+draw_hbar(mix_bx,mix_by,mix_bw,mix_bh,mix/100,hov_mix,18,"MIX",#vmix);
+
+sprintf(#vout,"%.1f dB",output_gain);
+draw_hbar(out_bx,out_by,out_bw,out_bh,(output_gain+24)/48,hov_out,18,"OUTPUT",#vout);
+
+// ---- status de carregamento das IRs ----
+load_ok ? (
+  gfx_r=0.4; gfx_g=0.7; gfx_b=0.4;
+) : (
+  gfx_r=0.9; gfx_g=0.3; gfx_b=0.3;
+);
+gfx_a=1;
+gfx_x=20; gfx_y=402;
+gfx_drawstr(load_ok ? "IRs OK" : "ERRO: 1.wav/2.wav/3.wav nao encontrados");
+
