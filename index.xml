@@ -14,12 +14,25 @@ saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></descriptio
     
     <reapack name="SomBinario_IronGrip.jsfx" type="effect" desc="SomBinario IronGrip">
       <metadata>
-        <description><![CDATA[Plugin de saturação e modelagem dinâmica com controle de Drive, Bite e Ceiling, focado em punch e caráter analógico.]]></description>
+        <description><![CDATA[O iron grip é Waveshaper com modelagem dinâmica de alta performance.]]></description>
         <link rel="website">https://sombinario.com</link>
       </metadata>
       <version name="1.0" author="Jorge Araujo (SomBinário)" time="2026-08-22T04:10:00Z">
         <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_IronGrip.jsfx</source>
         <source file="sb_knob.png">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/sb_knob.png</source>
+      </version>
+    </reapack>
+
+    <reapack name="SomBinario_TubeGlow.jsfx" type="effect" desc="SomBinario TubeGlow">
+      <metadata>
+        <description><![CDATA[O SomBinario TubeGlow é um saturador de válvula, trazendo calor, corpo e compressão valvulada ao som. Ideal para usar como pre-amp para colorir ou até mesmo esmagar o som. É um saturador suave baseado em convolução.]]></description>
+        <link rel="website">https://sombinario.com</link>
+      </metadata>
+      <version name="1.0" author="Jorge Araujo (SomBinário)" time="2026-08-24T02:18:00Z">
+        <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_TubeGlow.jsfx</source>
+        <source file="1.wav">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/1.wav</source>
+        <source file="2.wav">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/2.wav</source>
+        <source file="3.wav">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/3.wav</source>
       </version>
     </reapack>
   </category>
