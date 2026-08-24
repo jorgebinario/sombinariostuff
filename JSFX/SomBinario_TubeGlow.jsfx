@@ -8,7 +8,7 @@ desc:SomBinario TubeGlow
 // Este plugin requer os seguintes arquivos de Impulse Response:
 // - 1.wav (captura @18dB)
 // - 2.wav (captura @40dB)
-// - 3.wav (captura @76dB)
+// - 3.wav (captura @100dB)
 // Os três arquivos .wav DEVEM ser colocados na MESMA pasta 
 // deste arquivo .jsfx para que o plugin funcione corretamente.
 //
@@ -34,6 +34,7 @@ slider5:hd=1<0,1,1{Off,HD}>-Oversampling anti-alias (HD)
 slider6:tone_tilt=0<-100,100,1>-Tone Tilt (Escuro <-> Brilhante %)
 slider7:tube_bias=0<-100,100,1>-Bias (%)
 slider8:sag_amount=0<0,100,1>-Sag (%)
+slider9:material=0<0,5,1{Master/Mix Bus,Vocals,Bass,Guitar,Drums,Synth/Keys}>-Material
 
 @init
 
@@ -146,6 +147,27 @@ function eel_tanh(x)
   (e2x-1)/(e2x+1);
 );
 
+// as 4 famílias de curva de saturação - matemática original nossa, cada
+// uma com um "caráter" harmônico diferente:
+//  0 = TANH: suave, transparente (Master/Mix Bus)
+//  1 = ARCTAN: onset mais macio, "sedoso" (Vocals/Synth)
+//  2 = CUBIC soft-clip: mantém fundamental sólida, agudo mais contido (Bass)
+//  3 = DIODE assimétrico: mais "grão"/vintage, dois lados com taxas
+//      diferentes de saturação (Guitar/Drums)
+function curve_raw(x, ctype)
+  local(y)
+(
+  ctype == 0 ? ( y = eel_tanh(x); );
+  ctype == 1 ? ( y = atan(x) * 0.6366197724; ); // 2/pi, normaliza atan(inf)->1
+  ctype == 2 ? (
+    abs(x) < 1 ? ( y = x - (x*x*x)/3; ) : ( y = x>=0 ? 0.6666666667 : -0.6666666667; );
+  );
+  ctype == 3 ? (
+    x >= 0 ? ( y = 1 - exp(-x); ) : ( y = -(1 - exp(0.6*x)); );
+  );
+  y;
+);
+
 // recalcula todos os parâmetros derivados dos sliders (blend de IR, curva
 // de saturação, auto-gain, etc). Chamada tanto pelo @slider (quando o
 // REAPER muda um valor) quanto pela UI custom no @gfx (quando o usuário
@@ -200,16 +222,43 @@ function recalc_params()
   mix_norm = mix / 100;
   out_lin  = pow(2, output_gain/6.0206);
 
+  // ---- Material: mapeia pro tipo de curva de saturação (0=tanh, 1=arctan,
+  // 2=cubic soft-clip, 3=diode assimétrico) - matemática nossa, cada
+  // material usa a família que combina melhor com o tipo de sinal ----
+  curve_type = 0;
+  material==1 ? curve_type=1;
+  material==2 ? curve_type=2;
+  material==3 ? curve_type=3;
+  material==4 ? curve_type=3;
+  material==5 ? curve_type=1;
+
+  // ---- voz espectral por Material: shelf de grave (soma um pouco de
+  // grave de volta, "peso") + hpf (tira só o sub-rumble irrelevante,
+  // sem tocar na fundamental do instrumento) + lpf (contém o topo).
+  // Valores calibrados por nós com lógica musical - ex: Drums GANHA peso
+  // de grave (não perde), só corta sub abaixo do kick de verdade. ----
+  mat_shelf_gain = 0; mat_hpf_hz = 20; mat_lpf_hz = 20000;
+  material==0 ? ( mat_shelf_gain=0.00;  mat_hpf_hz=20; mat_lpf_hz=20000; ); // Master: quase transparente
+  material==1 ? ( mat_shelf_gain=-0.15; mat_hpf_hz=90; mat_lpf_hz=14000; ); // Vocals: tira boominess, hpf de mic padrão
+  material==2 ? ( mat_shelf_gain=0.25;  mat_hpf_hz=25; mat_lpf_hz=6000;  ); // Bass: GANHA peso, contém fiado/harshness
+  material==3 ? ( mat_shelf_gain=-0.10; mat_hpf_hz=80; mat_lpf_hz=11000; ); // Guitar: aperta um pouco o grave, mantém mordida
+  material==4 ? ( mat_shelf_gain=0.20;  mat_hpf_hz=30; mat_lpf_hz=17000; ); // Drums: GANHA peso de kick, só tira sub-rumble, mantém ataque/prato
+  material==5 ? ( mat_shelf_gain=0.05;  mat_hpf_hz=30; mat_lpf_hz=16000; ); // Synth: quase neutro
+  mat_hpf_coef = exp(-2*PI_CONST*mat_hpf_hz/srate);
+  mat_lpf_coef = exp(-2*PI_CONST*mat_lpf_hz/srate);
+
   // pre-calcula fatores de saturacao (so mudam quando slider muda)
   drv  = 1 + sat_norm*8;
   bias = (harmonics_pct/100) * 0.35; // limitado pra nao instabilizar a curva
-  tanh_drv_ref = eel_tanh(drv); // referencia de normalização (sem bias)
+  tanh_drv_ref = curve_raw(drv, curve_type); // referência de normalização (sem bias)
 
   // ---- auto-gain: compensa o ganho "de graça" que a curva de saturação
   // injeta em níveis médios conforme o Drive sobe (efeito tipo compressor).
   // Aplica só no lado saturado do blend (ver @sample) - o lado limpo (IR pura)
-  // não precisa dessa compensação. ----
-  comp_shape = eel_tanh(drv*probe_amp) / tanh_drv_ref;
+  // não precisa dessa compensação. Recalculada aqui pq depende da curva
+  // ativa (cada família de curva tem uma resposta diferente). ----
+  baseline_shape = curve_raw(1*probe_amp, curve_type) / curve_raw(1, curve_type);
+  comp_shape = curve_raw(drv*probe_amp, curve_type) / tanh_drv_ref;
   auto_gain = baseline_shape / max(comp_shape, 0.0001);
 
   tilt_norm = tone_tilt / 100; // -1..1
@@ -219,12 +268,37 @@ function recalc_params()
 
 // waveshaper com bias assimétrico (harmonics = bias PROPORCIONAL ao sinal,
 // gera 2º harmônico; bias_dc = deslocamento FIXO do ponto de operação,
-// tipo deriva de bias real de válvula - efeito diferente, mais "torto")
+// tipo deriva de bias real de válvula - efeito diferente, mais "torto").
+// Usa a família de curva definida pelo Material ativo (curve_type).
 function shape(x)
   local(y)
 (
-  y = eel_tanh(drv * (x + bias*x*x) + bias_dc);
+  y = curve_raw(drv * (x + bias*x*x) + bias_dc, curve_type);
   y;
+);
+
+// carrega o preset de Material (calibrado por nós, não copiado de nada) -
+// só roda quando o usuário CLICA num material na UI, nunca automaticamente,
+// pra não sobrescrever ajustes finos que o usuário já tenha feito.
+// Tilt fica em 0 pra todos - quem "voz" o tom de cada material agora é a
+// cadeia espectral (shelf+hpf+lpf) calculada em recalc_params, não o Tilt
+// manual (que fica livre pro usuário ajustar por cima sem conflito).
+function load_material_preset(m)
+(
+  m==0 ? ( drive_db=30; harmonics_pct=15; tone_tilt=0; tube_bias=0;  sag_amount=10; ); // Master/Mix Bus
+  m==1 ? ( drive_db=40; harmonics_pct=25; tone_tilt=0; tube_bias=10; sag_amount=15; ); // Vocals
+  m==2 ? ( drive_db=45; harmonics_pct=10; tone_tilt=0; tube_bias=0;  sag_amount=5;  ); // Bass
+  m==3 ? ( drive_db=55; harmonics_pct=35; tone_tilt=0; tube_bias=20; sag_amount=20; ); // Guitar
+  m==4 ? ( drive_db=50; harmonics_pct=20; tone_tilt=0; tube_bias=10; sag_amount=40; ); // Drums
+  m==5 ? ( drive_db=35; harmonics_pct=15; tone_tilt=0; tube_bias=0;  sag_amount=5;  ); // Synth/Keys
+  material = m;
+  slider_automate(drive_db);
+  slider_automate(harmonics_pct);
+  slider_automate(tone_tilt);
+  slider_automate(tube_bias);
+  slider_automate(sag_amount);
+  slider_automate(material);
+  recalc_params();
 );
 
 // ---- funções de apoio da UI custom ----
@@ -409,8 +483,42 @@ function draw_hd_button(bx, by, bw, bh, on, hovered)
   gfx_drawstr(#hdtxt, 1|4, bx+bw, by+bh);
 );
 
+// nome de cada perfil (usado na barra de seletor) - nomeados pelo caráter
+// sonoro que entregam, não pelo instrumento-alvo (cada um é curva de
+// saturação + filtro espectral + dinâmica combinados, não um preset simples)
+function set_material_name(m)
+(
+  m==0 ? sprintf(#mattxt, "GLUE");
+  m==1 ? sprintf(#mattxt, "SILK");
+  m==2 ? sprintf(#mattxt, "WEIGHT");
+  m==3 ? sprintf(#mattxt, "GRIT");
+  m==4 ? sprintf(#mattxt, "PUNCH");
+  m==5 ? sprintf(#mattxt, "SHEEN");
+);
+
+// barra de seleção de Material - 6 botões, o ativo acende em âmbar
+function draw_material_bar(bx, by, bw, bh, btnw, gap, active)
+  local(i, ix)
+(
+  i = 0;
+  loop(6,
+    ix = bx + i*(btnw+gap);
+    i==active ? (
+      gfx_r=0.95; gfx_g=0.6; gfx_b=0.16; gfx_a=1;
+    ) : (
+      gfx_r=0.13; gfx_g=0.13; gfx_b=0.13; gfx_a=1;
+    );
+    draw_rrect(ix,by,btnw,bh,6);
+
+    i==active ? ( gfx_r=0.1; gfx_g=0.08; gfx_b=0.07; ) : ( gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; );
+    set_material_name(i);
+    gfx_x=ix; gfx_y=by;
+    gfx_drawstr(#mattxt, 1|4, ix+btnw, by+bh);
+    i += 1;
+  );
+);
+
 probe_amp = 0.3; // nivel "tipico" de referencia (~-10.5dBFS) usado pro calculo do auto-gain
-baseline_shape = eel_tanh(1*probe_amp) / eel_tanh(1); // resposta da curva no Drive minimo (drv=1)
 EXTRA_SAT_BOOST = 0.6; // o quanto a saturação ainda pode crescer entre 76-100dB (zona extrapolada)
 
 // ---- filtro de decimação pro oversampling 2x (anti-alias de verdade) ----
@@ -512,6 +620,16 @@ dc_x1_L = 0; dc_y1_L = 0;
 dc_x1_R = 0; dc_y1_R = 0;
 dc_r = 0.9995; // fator do DC blocker (quanto mais perto de 1, mais sutil)
 
+// ---- Voz espectral por Material: shelf de grave (add-back) + hpf + lpf,
+// tudo filtros de 1 polo (mesma técnica já usada no DC blocker/Tilt).
+// O pivô do shelf é fixo; hpf/lpf variam por material (ver recalc_params).
+// Estado separado por canal, pra preservar a imagem estéreo. ----
+SHELF_PIVOT_HZ = 150;
+shelf_lp_coef = exp(-2*PI_CONST*SHELF_PIVOT_HZ/srate);
+mat_shelf_lp_L = 0; mat_shelf_lp_R = 0;
+mat_hpf_lp_L = 0; mat_hpf_lp_R = 0;
+mat_lpf_L = 0; mat_lpf_R = 0;
+
 // ---- Tone Tilt: filtro tilt de 1 polo, pivô em ~700Hz. Inclina o
 // espectro que entra na saturação (não afeta o lado "limpo" do Mix) ----
 // Estado separado por canal, pra preservar a imagem estéreo.
@@ -565,14 +683,30 @@ loop(irlen,
 wpos += 1;
 wpos >= MAXLEN ? wpos = 0;
 
-// ---- Tone Tilt: inclina o espectro que vai entrar na saturação (por canal) ----
-tilt_lp_L = tilt_lp_L + (1-tilt_a)*(accL - tilt_lp_L);
-tilt_hp_L = accL - tilt_lp_L;
-tiltedL = accL + tilt_norm*TILT_DEPTH*(tilt_hp_L - tilt_lp_L);
+// ---- voz espectral por Material (shelf de grave + hpf + lpf), por canal ----
+mat_shelf_lp_L = mat_shelf_lp_L + (1-shelf_lp_coef)*(accL - mat_shelf_lp_L);
+voicedL = accL + mat_shelf_gain*mat_shelf_lp_L;
+mat_hpf_lp_L = mat_hpf_lp_L + (1-mat_hpf_coef)*(voicedL - mat_hpf_lp_L);
+voicedL = voicedL - mat_hpf_lp_L;
+mat_lpf_L = mat_lpf_L + (1-mat_lpf_coef)*(voicedL - mat_lpf_L);
+voicedL = mat_lpf_L;
 
-tilt_lp_R = tilt_lp_R + (1-tilt_a)*(accR - tilt_lp_R);
-tilt_hp_R = accR - tilt_lp_R;
-tiltedR = accR + tilt_norm*TILT_DEPTH*(tilt_hp_R - tilt_lp_R);
+mat_shelf_lp_R = mat_shelf_lp_R + (1-shelf_lp_coef)*(accR - mat_shelf_lp_R);
+voicedR = accR + mat_shelf_gain*mat_shelf_lp_R;
+mat_hpf_lp_R = mat_hpf_lp_R + (1-mat_hpf_coef)*(voicedR - mat_hpf_lp_R);
+voicedR = voicedR - mat_hpf_lp_R;
+mat_lpf_R = mat_lpf_R + (1-mat_lpf_coef)*(voicedR - mat_lpf_R);
+voicedR = mat_lpf_R;
+
+// ---- Tone Tilt: ajuste manual do usuário, aplicado POR CIMA da voz do
+// material (não briga com o preset - fica livre pra fine-tuning) ----
+tilt_lp_L = tilt_lp_L + (1-tilt_a)*(voicedL - tilt_lp_L);
+tilt_hp_L = voicedL - tilt_lp_L;
+tiltedL = voicedL + tilt_norm*TILT_DEPTH*(tilt_hp_L - tilt_lp_L);
+
+tilt_lp_R = tilt_lp_R + (1-tilt_a)*(voicedR - tilt_lp_R);
+tilt_hp_R = voicedR - tilt_lp_R;
+tiltedR = voicedR + tilt_norm*TILT_DEPTH*(tilt_hp_R - tilt_lp_R);
 
 // ---- Sag: envelope LINKADO (detecção compartilhada L/R) - preserva o
 // balanço estéreo sob transiente, aplicando a mesma redução aos dois canais.
@@ -654,11 +788,14 @@ wet_sat_L *= auto_gain;
 wet_sat_R *= auto_gain;
 
 // atrasa o lado "limpo" (por canal) pra alinhar com o atraso de grupo do
-// filtro de decimação (senão reabre o problema de comb filtering no Mix)
+// filtro de decimação (senão reabre o problema de comb filtering no Mix).
+// Usa "tiltedL/R" (já com a voz do material + Tilt manual aplicados) em
+// vez do "accL/R" cru, pra o Mix refletir o material escolhido mesmo
+// em valores baixos (não só quando 100% saturado).
 acc_clean_L = acc_delay_buf_L[adly_wpos];
-acc_delay_buf_L[adly_wpos] = accL;
+acc_delay_buf_L[adly_wpos] = tiltedL;
 acc_clean_R = acc_delay_buf_R[adly_wpos];
-acc_delay_buf_R[adly_wpos] = accR;
+acc_delay_buf_R[adly_wpos] = tiltedR;
 adly_wpos += 1;
 adly_wpos >= OS_DELAY_SAMPLES ? adly_wpos = 0;
 
@@ -672,7 +809,7 @@ final_R *= out_lin;
 spl0 = final_L;
 spl1 = final_R;
 
-@gfx 600 420
+@gfx 600 496
 
 // trava a fonte explicitamente - sem isso, gfx_measurestr pode medir
 // diferente do que gfx_drawstr realmente desenha, descentralizando texto
@@ -680,33 +817,38 @@ gfx_setfont(1, "Arial", 15);
 
 // ---- fundo: dark mode sólido e liso ----
 gfx_r=0.10; gfx_g=0.10; gfx_b=0.10; gfx_a=1;
-gfx_rect(0,0,600,420,1);
+gfx_rect(0,0,600,496,1);
 
 // ---- estado do mouse (uma vez por frame) ----
 left_down = (mouse_cap&1) != 0;
 just_pressed = left_down && !prev_left_down;
 shift_held = (mouse_cap&8) != 0;
 
+// ---- barra de Material (seletor de tipo de sinal) ----
+mat_bx = 15; mat_by = 58; mat_bw = 570; mat_bh = 22; mat_gap = 4;
+mat_btn_w = (mat_bw - mat_gap*5) / 6;
+
 // ---- painéis de agrupamento sutis (fundo 3% mais claro, sem borda) ----
-PANEL_TOP = 50; PANEL_H = 278;
+PANEL_TOP = 88; PANEL_H = 310;
 draw_panel(15,PANEL_TOP,170,PANEL_H);   // esquerda: TONE SHAPING
 draw_panel(200,PANEL_TOP,200,PANEL_H);  // centro: DRIVE
 draw_panel(415,PANEL_TOP,170,PANEL_H);  // direita: TUBE DYNAMICS
 
 // ---- posições: knobs (Drive gigante no centro, os outros nos módulos) ----
-KY_TOP = 138; KY_BOT = 258;
-kx_drive = 300; ky_drive = 157; kr_drive = 65;
+KY_TOP = PANEL_TOP+88; KY_BOT = PANEL_TOP+208;
+kx_drive = 300; ky_drive = PANEL_TOP+107; kr_drive = 65;
 kx_harm  = 100; ky_harm  = KY_TOP; kr_side = 30;
 kx_tilt  = 100; ky_tilt  = KY_BOT;
 kx_bias  = 500; ky_bias  = KY_TOP;
 kx_sag   = 500; ky_sag   = KY_BOT;
 
 // ---- posições: barras horizontais (Mix/Output no rodapé) ----
-mix_bx=20; mix_by=365; mix_bw=270; mix_bh=22;
-out_bx=310; out_by=365; out_bw=270; out_bh=22;
+mix_bx=20; mix_by=426; mix_bw=270; mix_bh=22;
+out_bx=310; out_by=426; out_bw=270; out_bh=22;
 
 // ---- botão HD ----
 hd_bx=515; hd_by=10; hd_bw=70; hd_bh=28;
+
 
 // ---- detecta clique (transição de botão) - Alt+clique ou duplo clique
 // reseta o controle pro padrão; clique normal inicia o arraste ----
@@ -753,6 +895,13 @@ just_pressed ? (
     pt_in_rect(mouse_x,mouse_y,hd_bx,hd_by,hd_bw,hd_bh) ? (
       hd = hd>0.5 ? 0 : 1;
       slider_automate(hd);
+    );
+    // botões de Material - clique carrega o preset daquele material
+    mi = 0;
+    loop(6,
+      mbx = mat_bx + mi*(mat_btn_w+mat_gap);
+      pt_in_rect(mouse_x,mouse_y,mbx,mat_by,mat_btn_w,mat_bh) ? load_material_preset(mi);
+      mi += 1;
     );
   );
 );
@@ -848,6 +997,25 @@ draw_logo_box(170,10,260,28);
 // ---- botão HD (canto superior direito) ----
 draw_hd_button(hd_bx,hd_by,hd_bw,hd_bh, hd>0.5, pt_in_rect(mouse_x,mouse_y,hd_bx,hd_by,hd_bw,hd_bh));
 
+// ---- barra de seleção de Material ----
+// ---- barra de seleção de Material (título "VOICING ENGINE" centralizado,
+// com uma linha fina de cada lado - visual de divisor de seção) ----
+voic_cx = mat_bx + mat_bw/2; // centro horizontal da barra
+voic_tw = 130; // largura estimada do texto (string fixa, não muda)
+voic_gap = 10; // espaço entre o texto e as linhas
+voic_line_y = 49;
+
+gfx_r=0.3; gfx_g=0.28; gfx_b=0.25; gfx_a=1;
+gfx_rect(mat_bx, voic_line_y, (voic_cx-voic_tw/2-voic_gap)-mat_bx, 1, 1);
+gfx_rect(voic_cx+voic_tw/2+voic_gap, voic_line_y, (mat_bx+mat_bw)-(voic_cx+voic_tw/2+voic_gap), 1, 1);
+
+gfx_r=0.5; gfx_g=0.5; gfx_b=0.52; gfx_a=1;
+sprintf(#voictxt, "VOICING ENGINE");
+gfx_x=mat_bx; gfx_y=42;
+gfx_drawstr(#voictxt, 1, mat_bx+mat_bw, 42+16);
+
+draw_material_bar(mat_bx,mat_by,mat_bw,mat_bh,mat_btn_w,mat_gap,material);
+
 // ---- módulo esquerdo: TONE SHAPING (Harmonics + Tilt) ----
 draw_module_box(15,PANEL_TOP,170,PANEL_H,"TONE SHAPING");
 sprintf(#v2,"%.0f%%",harmonics_pct);
@@ -867,16 +1035,15 @@ sprintf(#v1,"%.0f dB",drive_db);
 drive_norm = (drive_db-18)/(100-18);
 draw_knob_block(kx_drive,ky_drive,kr_drive,drive_norm,hov_drive,"DRIVE",#v1,28,60);
 
-// leitura em tempo real da redução de ganho aplicada pelo Sag
-// (sag_reduction vai de 1.0 = sem redução até 0.3 = redução máxima)
-gr_norm = (1 - sag_reduction) / 0.7;
-gr_norm < 0 ? gr_norm = 0;
-gr_norm > 1 ? gr_norm = 1;
-
+// ---- Sag Gain Reduction ----
 gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
 sprintf(#grlbl, "SAG GAIN REDUCTION");
 gfx_x = kx_drive-90; gfx_y = PANEL_TOP+214;
 gfx_drawstr(#grlbl, 1, kx_drive+90, PANEL_TOP+230);
+
+gr_norm = (1 - sag_reduction) / 0.7;
+gr_norm < 0 ? gr_norm = 0;
+gr_norm > 1 ? gr_norm = 1;
 
 draw_sat_meter(kx_drive,PANEL_TOP+236,170,16,gr_norm,10);
 
@@ -894,6 +1061,5 @@ load_ok ? (
   gfx_r=0.9; gfx_g=0.3; gfx_b=0.3;
 );
 gfx_a=1;
-gfx_x=20; gfx_y=402;
+gfx_x=20; gfx_y=468;
 gfx_drawstr(load_ok ? "IRs OK" : "ERRO: 1.wav/2.wav/3.wav nao encontrados");
-
