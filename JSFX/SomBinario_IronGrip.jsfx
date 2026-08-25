@@ -1,4 +1,4 @@
-desc:SomBinario IronGrip WaveShaper (v2.0.1)
+desc:SomBinario IronGrip WaveShaper (v2.0.2)
 filename:0,sb_knob.png
 
 slider1:0<-24,24,0.1>-Pre-band (dB)
@@ -16,9 +16,11 @@ slider6:0<-6,6,0.01>-Output Trim (dB)
 MAX_PTS   = 32;
 LUT_SIZE  = 512;
 
-pts_x = 0;            // pts_x[i]  -> i = 0..MAX_PTS-1
-pts_y = MAX_PTS;       // pts_y[i]
-lut   = MAX_PTS * 2;   // lut[j]    -> j = 0..LUT_SIZE-1
+pts_x = 0;               // pts_x[i]  -> i = 0..MAX_PTS-1
+pts_y = MAX_PTS;          // pts_y[i]
+lut_a = MAX_PTS * 2;      // buffer A da LUT
+lut_b = lut_a + LUT_SIZE; // buffer B da LUT
+lut_active = 0;           // 0 = audio le lut_a | 1 = audio le lut_b
 
 // =========================================================
 // Filtro biquad (2x 2a ordem = 4a ordem) usado como
@@ -51,14 +53,18 @@ function catmull(p0, p1, p2, p3, t) local(t2, t3) (
     0.5 * ( (2*p1) + (-p0+p2)*t + (2*p0-5*p1+4*p2-p3)*t2 + (-p0+3*p1-3*p2+p3)*t3 );
 );
 
-function rebuild_lut() local(j, xval, seg, x0, x1, y0, y1, ym1, y2, t) (
+function rebuild_lut() local(j, xval, seg, x0, x1, y0, y1, ym1, y2, t, wbuf) (
+    // Escreve no buffer que o audio NAO esta lendo agora, e so troca
+    // o ponteiro (lut_active) quando termina de preencher tudo.
+    // Evita o audio ler a LUT pela metade -> estalo/crackle ao trocar curva.
+    wbuf = (lut_active == 0) ? lut_b : lut_a;
     j = 0;
     loop(LUT_SIZE,
         xval = -1 + 2*j/(LUT_SIZE-1);
         xval <= pts_x[0] ? (
-            lut[j] = pts_y[0];
+            wbuf[j] = pts_y[0];
         ) : xval >= pts_x[num_pts-1] ? (
-            lut[j] = pts_y[num_pts-1];
+            wbuf[j] = pts_y[num_pts-1];
         ) : (
             seg = find_seg(xval);
             x0 = pts_x[seg]; x1 = pts_x[seg+1];
@@ -66,19 +72,21 @@ function rebuild_lut() local(j, xval, seg, x0, x1, y0, y1, ym1, y2, t) (
             seg > 0 ? ym1 = pts_y[seg-1] : ym1 = y0;
             seg < num_pts-2 ? y2 = pts_y[seg+2] : y2 = y1;
             t = (x1 > x0) ? (xval - x0) / (x1 - x0) : 0;
-            lut[j] = catmull(ym1, y0, y1, y2, t);
+            wbuf[j] = catmull(ym1, y0, y1, y2, t);
         );
         j += 1;
     );
+    lut_active = 1 - lut_active;
 );
 
-function shaper_lookup(x) local(idx_f, idx0, idx1, frac, y0, y1) (
+function shaper_lookup(x) local(idx_f, idx0, idx1, frac, y0, y1, rbuf) (
+    rbuf = (lut_active == 0) ? lut_a : lut_b;
     x = min(max(x, -1), 1);
     idx_f = (x + 1) * 0.5 * (LUT_SIZE - 1);
     idx0 = floor(idx_f);
     idx1 = min(idx0 + 1, LUT_SIZE - 1);
     frac = idx_f - idx0;
-    y0 = lut[idx0]; y1 = lut[idx1];
+    y0 = rbuf[idx0]; y1 = rbuf[idx1];
     y0 + (y1 - y0) * frac;
 );
 
