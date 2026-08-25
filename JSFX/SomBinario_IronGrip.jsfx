@@ -1,4 +1,4 @@
-desc:SomBinario IronGrip WaveShaper (v2.0.2)
+desc:SomBinario IronGrip WaveShaper (v2.0.3)
 filename:0,sb_knob.png
 
 slider1:0<-24,24,0.1>-Pre-band (dB)
@@ -87,17 +87,25 @@ function rebuild_lut() local(j, xval, seg, x0, x1, y0, y1, ym1, y2, t, wbuf) (
         j += 1;
     );
     lut_active = 1 - lut_active;
+    morph = 0.0;
 );
 
-function shaper_lookup(x) local(idx_f, idx0, idx1, frac, y0, y1, rbuf) (
-    rbuf = (lut_active == 0) ? lut_a : lut_b;
+function shaper_lookup(x) local(idx_f, idx0, idx1, frac, y0n, y1n, y0o, y1o, rbuf_n, rbuf_o, val_new, val_old) (
+    // Le dos DOIS buffers (o ativo e o anterior) e cruza (morph) entre
+    // eles suavemente. Sem isso, cada atualizacao da curva ao arrastar
+    // um node troca a forma de onda de forma abrupta -> zumbido grave.
+    rbuf_n = (lut_active == 0) ? lut_a : lut_b;
+    rbuf_o = (lut_active == 0) ? lut_b : lut_a;
     x = min(max(x, -1), 1);
     idx_f = (x + 1) * 0.5 * (LUT_SIZE - 1);
     idx0 = floor(idx_f);
     idx1 = min(idx0 + 1, LUT_SIZE - 1);
     frac = idx_f - idx0;
-    y0 = rbuf[idx0]; y1 = rbuf[idx1];
-    y0 + (y1 - y0) * frac;
+    y0n = rbuf_n[idx0]; y1n = rbuf_n[idx1];
+    y0o = rbuf_o[idx0]; y1o = rbuf_o[idx1];
+    val_new = y0n + (y1n - y0n) * frac;
+    val_old = y0o + (y1o - y0o) * frac;
+    val_old + (val_new - val_old) * morph;
 );
 
 function insert_point(xv, yv) local(i, ins) (
@@ -186,6 +194,7 @@ num_pts == 0 ? (
     pts_x[1] = 1;  pts_y[1] = 1;
 );
 rebuild_lut();
+morph = 1.0;
 
 drag_pt = -1;
 hover_pt = -1;
@@ -224,10 +233,13 @@ new_os != os_factor || srate != last_srate ? (
     lp_l.f4_set(cutoff, srate * os_factor);
     lp_r.f4_set(cutoff, srate * os_factor);
     rms_tc = 1.0 - exp(-1.0 / (0.3 * srate));
+    morph_coef = 1.0 - exp(-1.0 / (0.02 * srate)); // crossfade de curva em ~20ms
 );
 
 @sample
 dry_l = spl0; dry_r = spl1;
+
+morph = min(morph + morph_coef, 1.0);
 
 os_factor == 1 ? (
     out_l = shaper_lookup(spl0 * pre_lin);
