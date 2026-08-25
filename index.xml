@@ -12,13 +12,13 @@ saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></descriptio
       </version>
     </reapack>
 
-    <reapack name="SomBinario_IronGrip.jsfx" type="effect" desc="SomBinario Waveshaper">
+    <reapack name="SomBinario_Waveshaper.jsfx" type="effect" desc="SomBinario Waveshaper">
       <metadata>
         <description><![CDATA[O SomBinario Waveshaper é um Waveshaper com modelagem dinâmica de alta performance.]]></description>
         <link rel="website">https://sombinario.com</link>
       </metadata>
-      <version name="1.1" author="Jorge Araujo (SomBinário)" time="2026-08-25T22:40:00Z">
-        <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_IronGrip.jsfx</source>
+      <version name="1.2" author="Jorge Araujo (SomBinário)" time="2026-08-25T23:10:00Z">
+        <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_Waveshaper.jsfx</source>
         <source file="sb_knob.png">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/sb_knob.png</source>
       </version>
     </reapack>
