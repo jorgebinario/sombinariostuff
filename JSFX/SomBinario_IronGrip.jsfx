@@ -1,4 +1,4 @@
-desc:SomBinario IronGrip WaveShaper (v1.1)
+desc:SomBinario Waveshaper v1.1 (SomBinario)
 filename:0,sb_knob.png
 
 slider1:0<-24,24,0.1>-Pre-band (dB)
@@ -223,7 +223,8 @@ morph = 1.0;
 
 drag_pt = -1;
 hover_pt = -1;
-last_rebuild_time = 0;
+pending_commit = 0;
+wait_ctr = 0;
 active_knob = 0;
 last_mouse_cap = 0;
 last_click_time = 0;
@@ -264,6 +265,19 @@ new_os != os_factor || srate != last_srate ? (
 
 @sample
 dry_l = spl0; dry_r = spl1;
+
+pending_commit ? (
+    wait_ctr += 1;
+    // troca a curva so quando o sinal estiver perto do silencio
+    // (zero-crossing), ja que toda curva passa por 0,0 - isso
+    // praticamente elimina o salto audivel. Teto de seguranca de
+    // 250ms caso o audio nunca fique quieto (ex: tom sustentado).
+    (abs(spl0) < 0.02 && abs(spl1) < 0.02) || wait_ctr > srate * 0.25 ? (
+        rebuild_lut();
+        pending_commit = 0;
+        wait_ctr = 0;
+    );
+);
 
 morph = min(morph + morph_coef, 1.0);
 
@@ -476,7 +490,7 @@ gfx_h < 250 ? (
     gfx_rect(0, 0, gfx_w, 40);
     gfx_r=1; gfx_g=1; gfx_b=1; gfx_setfont(1, "Arial", 18, 'b');
     gfx_x = 20; gfx_y = 10;
-    gfx_drawstr("SOMBINÁRIO IRONGRIP — WaveShaper");
+    gfx_drawstr("SomBinario Waveshaper v1.1");
 
     gx = 25; gy = 55; gw = 600; gh = 280;
 
@@ -537,7 +551,8 @@ gfx_h < 250 ? (
     );
 
     mouse_cap == 0 && drag_pt >= 0 ? (
-        rebuild_lut();
+        pending_commit = 1;
+        wait_ctr = 0;
     );
     mouse_cap == 0 ? ( drag_pt = -1; );
 
