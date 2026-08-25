@@ -6,7 +6,7 @@ slider2:0<-24,24,0.1>-Post-band (dB)
 slider3:100<0,100,1>-Mix (%)
 slider4:0<0,3,1{Desligado,2x,4x,8x}>-Oversampling
 slider5:0<0,1,1{Desligado,Ligado}>-Auto Gain
-slider6:0<-6,6,0.01>-Output Trim (dB)
+slider6:0<-18,18,0.01>-Output Trim (dB)
 
 @init
 
@@ -45,6 +45,7 @@ function f4_process(x) (
 // Corte ~20Hz: rapido o suficiente pra nao "tocar" (ring) em transientes.
 function dcblock(x) local(y) (
     y = x - this.xz1 + 0.997 * this.yz1;
+    y = min(max(y, -2), 2); // evita "windup": estado interno nunca dispara
     this.xz1 = x;
     this.yz1 = y;
     y;
@@ -86,7 +87,7 @@ function rebuild_lut() local(j, xval, seg, x0, x1, y0, y1, ym1, y2, t, wbuf) (
             seg > 0 ? ym1 = pts_y[seg-1] : ym1 = y0;
             seg < num_pts-2 ? y2 = pts_y[seg+2] : y2 = y1;
             t = (x1 > x0) ? (xval - x0) / (x1 - x0) : 0;
-            wbuf[j] = catmull(ym1, y0, y1, y2, t);
+            wbuf[j] = min(max(catmull(ym1, y0, y1, y2, t), -1.2), 1.2);
         );
         j += 1;
     );
@@ -127,7 +128,7 @@ function eval_curve(xv) local(seg, x0, x1, y0, y1, ym1, y2, t) (
         seg > 0 ? ym1 = pts_y[seg-1] : ym1 = y0;
         seg < num_pts-2 ? y2 = pts_y[seg+2] : y2 = y1;
         t = (x1 > x0) ? (xv - x0) / (x1 - x0) : 0;
-        catmull(ym1, y0, y1, y2, t);
+        min(max(catmull(ym1, y0, y1, y2, t), -1.2), 1.2);
     );
 );
 
@@ -303,14 +304,18 @@ os_factor == 1 ? (
 out_l = dcb_l.dcblock(out_l);
 out_r = dcb_r.dcblock(out_r);
 
-spl0 = (out_l * post_lin * mix_pct) + (dry_l * (1 - mix_pct));
-spl1 = (out_r * post_lin * mix_pct) + (dry_r * (1 - mix_pct));
+// Caminho "wet": Post-band + Trim atuam so aqui, o seco nunca e tocado
+wet_l = out_l * post_lin * trim_lin;
+wet_r = out_r * post_lin * trim_lin;
 
-// Auto Gain (RMS-matched) - iguala volume percebido entre seco e processado
+// Auto Gain (RMS-matched) - compara o wet puro contra o seco, e o
+// ganho de compensacao entra so no wet. Assim o Mix interno se comporta
+// como o Wet nativo do REAPER: o seco nunca sofre nenhuma influencia
+// de Post-band, Trim ou Auto Gain, so o quanto de wet entra na mistura.
 ms_in_l  += rms_tc * (dry_l*dry_l - ms_in_l);
 ms_in_r  += rms_tc * (dry_r*dry_r - ms_in_r);
-ms_out_l += rms_tc * (spl0*spl0 - ms_out_l);
-ms_out_r += rms_tc * (spl1*spl1 - ms_out_r);
+ms_out_l += rms_tc * (wet_l*wet_l - ms_out_l);
+ms_out_r += rms_tc * (wet_r*wet_r - ms_out_r);
 
 slider5 >= 0.5 ? (
     ms_in_avg  = (ms_in_l + ms_in_r) * 0.5;
@@ -321,8 +326,11 @@ slider5 >= 0.5 ? (
     auto_gain_lin = 1.0;
 );
 
-spl0 *= auto_gain_lin * trim_lin;
-spl1 *= auto_gain_lin * trim_lin;
+wet_l *= auto_gain_lin;
+wet_r *= auto_gain_lin;
+
+spl0 = (wet_l * mix_pct) + (dry_l * (1 - mix_pct));
+spl1 = (wet_r * mix_pct) + (dry_r * (1 - mix_pct));
 spl0 = min(max(spl0, -1.0), 1.0);
 spl1 = min(max(spl1, -1.0), 1.0);
 
@@ -353,7 +361,7 @@ function draw_preset_button(id, label, bx, by, bw, bh) local(is_h, tw) (
 function process_knob_small(x, y, size, title)
 local(norm_val, frame, is_hover, text_w, img_w, img_h, slider_val, delta, min_val, max_val, init_val)
 (
-    min_val = -6; max_val = 6; init_val = 0;
+    min_val = -18; max_val = 18; init_val = 0;
     slider_val = slider6;
 
     is_hover = (mouse_x >= x && mouse_x <= x + size && mouse_y >= y && mouse_y <= y + size);
@@ -375,8 +383,7 @@ local(norm_val, frame, is_hover, text_w, img_w, img_h, slider_val, delta, min_va
 
     active_knob == 6 && mouse_cap == 1 ? (
         delta = (mouse_last_y - mouse_y) * 0.5;
-        // divisor maior = passo mais fino, ajuste milimetrico de ganho
-        slider_val = min(max(slider_val + delta * (max_val - min_val) / 200, min_val), max_val);
+        slider_val = min(max(slider_val + delta * (max_val - min_val) / 100, min_val), max_val);
         slider6 = slider_val;
         sliderchange(32);
         mouse_last_y = mouse_y;
