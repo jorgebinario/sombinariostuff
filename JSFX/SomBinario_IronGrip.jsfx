@@ -1,4 +1,4 @@
-desc:SomBinario IronGrip WaveShaper (v2.0.3)
+desc:SomBinario IronGrip WaveShaper (v1.1)
 filename:0,sb_knob.png
 
 slider1:0<-24,24,0.1>-Pre-band (dB)
@@ -15,6 +15,9 @@ slider6:0<-6,6,0.01>-Output Trim (dB)
 // =========================================================
 MAX_PTS   = 32;
 LUT_SIZE  = 512;
+NODE_MARGIN = 0.04;   // espacamento minimo em X entre nodes vizinhos
+                       // (limita a inclinacao maxima da curva e evita
+                       // que ruido de fundo seja amplificado em cliques)
 
 pts_x = 0;               // pts_x[i]  -> i = 0..MAX_PTS-1
 pts_y = MAX_PTS;          // pts_y[i]
@@ -112,6 +115,9 @@ function insert_point(xv, yv) local(i, ins) (
     num_pts < MAX_PTS ? (
         ins = 0;
         while (ins < num_pts && pts_x[ins] < xv) ( ins += 1; );
+        // respeita a margem minima em relacao aos vizinhos existentes
+        ins > 0 ? xv = max(xv, pts_x[ins-1] + NODE_MARGIN);
+        ins < num_pts ? xv = min(xv, pts_x[ins] - NODE_MARGIN);
         i = num_pts;
         while (i > ins) (
             pts_x[i] = pts_x[i-1];
@@ -198,6 +204,7 @@ morph = 1.0;
 
 drag_pt = -1;
 hover_pt = -1;
+last_rebuild_time = 0;
 active_knob = 0;
 last_mouse_cap = 0;
 last_click_time = 0;
@@ -502,13 +509,24 @@ gfx_h < 250 ? (
         ) : drag_pt == num_pts-1 ? (
             new_x = 1;
         ) : (
-            new_x = min(max(norm_x(mouse_x), pts_x[drag_pt-1]+0.01), pts_x[drag_pt+1]-0.01);
+            new_x = min(max(norm_x(mouse_x), pts_x[drag_pt-1]+NODE_MARGIN), pts_x[drag_pt+1]-NODE_MARGIN);
         );
         pts_x[drag_pt] = new_x;
         pts_y[drag_pt] = new_y;
-        rebuild_lut();
+        // throttle: so reconstroi a LUT no maximo a cada 25ms durante o
+        // arrasto continuo, dando tempo do crossfade anterior (20ms)
+        // terminar antes de mexer de novo no buffer "antigo"
+        (time_precise() - last_rebuild_time) >= 0.025 ? (
+            rebuild_lut();
+            last_rebuild_time = time_precise();
+        );
     );
 
+    mouse_cap == 0 && drag_pt >= 0 ? (
+        // garante que a posicao final do arrasto seja aplicada ao soltar
+        rebuild_lut();
+        last_rebuild_time = time_precise();
+    );
     mouse_cap == 0 ? ( drag_pt = -1; );
 
     // curva
