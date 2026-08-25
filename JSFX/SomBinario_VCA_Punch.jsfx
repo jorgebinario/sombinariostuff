@@ -10,7 +10,7 @@
 //   Website https://sombinario.com.BR
 // ------------------------------------------------------------------
 
-desc:SomBinario VCA Punch
+desc:SomBinario TubeGlow v1.2 (SomBinario)
 options: gfx_hz=60
 
 slider1:-18<-50,15,0.1>-Threshold (dB)
