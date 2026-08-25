@@ -1,4 +1,4 @@
-desc:SomBinario IronGrip WaveShaper (v2.0)
+desc:SomBinario IronGrip WaveShaper (v2.0.1)
 filename:0,sb_knob.png
 
 slider1:0<-24,24,0.1>-Pre-band (dB)
@@ -6,6 +6,7 @@ slider2:0<-24,24,0.1>-Post-band (dB)
 slider3:100<0,100,1>-Mix (%)
 slider4:0<0,3,1{Desligado,2x,4x,8x}>-Oversampling
 slider5:0<0,1,1{Desligado,Ligado}>-Auto Gain
+slider6:0<-6,6,0.01>-Output Trim (dB)
 
 @init
 
@@ -156,10 +157,14 @@ function apply_preset(id) (
     rebuild_lut();
 );
 
-// Estado inicial (sera sobrescrito por @serialize se houver projeto salvo)
-num_pts = 2;
-pts_x[0] = -1; pts_y[0] = -1;
-pts_x[1] = 1;  pts_y[1] = 1;
+// Estado inicial - so aplica a linha padrao se ainda nao houver curva
+// em memoria (evita resetar os pontos quando o REAPER re-executa o
+// @init ao dar bypass/unbypass no plugin)
+num_pts == 0 ? (
+    num_pts = 2;
+    pts_x[0] = -1; pts_y[0] = -1;
+    pts_x[1] = 1;  pts_y[1] = 1;
+);
 rebuild_lut();
 
 drag_pt = -1;
@@ -189,6 +194,7 @@ rebuild_lut();
 pre_lin  = 10^(slider1/20);
 post_lin = 10^(slider2/20);
 mix_pct  = slider3/100;
+trim_lin = 10^(slider6/20);
 
 new_os = (slider4 == 0) ? 1 : (slider4 == 1) ? 2 : (slider4 == 2) ? 4 : 8;
 new_os != os_factor || srate != last_srate ? (
@@ -240,8 +246,8 @@ slider5 >= 0.5 ? (
     auto_gain_lin = 1.0;
 );
 
-spl0 *= auto_gain_lin;
-spl1 *= auto_gain_lin;
+spl0 *= auto_gain_lin * trim_lin;
+spl1 *= auto_gain_lin * trim_lin;
 spl0 = min(max(spl0, -1.0), 1.0);
 spl1 = min(max(spl1, -1.0), 1.0);
 
@@ -267,6 +273,61 @@ function draw_preset_button(id, label, bx, by, bw, bh) local(is_h, tw) (
     gfx_x = bx + (bw-6)/2 - tw/2;
     gfx_y = by + bh/2 - 6;
     gfx_drawstr(label);
+);
+
+function process_knob_small(x, y, size, title)
+local(norm_val, frame, is_hover, text_w, img_w, img_h, slider_val, delta, min_val, max_val, init_val)
+(
+    min_val = -6; max_val = 6; init_val = 0;
+    slider_val = slider6;
+
+    is_hover = (mouse_x >= x && mouse_x <= x + size && mouse_y >= y && mouse_y <= y + size);
+
+    is_hover && mouse_cap == 1 && last_mouse_cap == 0 && active_knob == 0 ? (
+        (time_precise() - last_click_time < 0.25) && (last_clicked_knob == 6) || (mouse_cap & 4) ? (
+            slider_val = init_val;
+            slider6 = slider_val;
+            sliderchange(32);
+            last_click_time = 0;
+            active_knob = 99;
+        ) : (
+            last_click_time = time_precise();
+            last_clicked_knob = 6;
+            active_knob = 6;
+            mouse_last_y = mouse_y;
+        );
+    );
+
+    active_knob == 6 && mouse_cap == 1 ? (
+        delta = (mouse_last_y - mouse_y) * 0.5;
+        // divisor maior = passo mais fino, ajuste milimetrico de ganho
+        slider_val = min(max(slider_val + delta * (max_val - min_val) / 200, min_val), max_val);
+        slider6 = slider_val;
+        sliderchange(32);
+        mouse_last_y = mouse_y;
+    );
+
+    norm_val = (slider_val - min_val) / (max_val - min_val);
+    frame = floor(norm_val * (knob_frames - 1));
+
+    gfx_getimgdim(0, img_w, img_h);
+    img_w > 0 ? (
+        gfx_blit(0, 1, 0, 0, frame * 100, 100, 100, x, y, size, size);
+    );
+
+    gfx_setfont(1, "Arial", 10);
+    gfx_r=0.7; gfx_g=0.7; gfx_b=0.7;
+    gfx_measurestr(title, text_w, 0);
+    gfx_x = x + (size/2) - (text_w/2);
+    gfx_y = y + size + 3;
+    gfx_drawstr(title);
+
+    sprintf(#val_str2, "%+.2f", slider_val);
+    gfx_measurestr(#val_str2, text_w, 0);
+    gfx_x = x + (size/2) - (text_w/2);
+    gfx_y = y + size + 15;
+    gfx_r=0.9; gfx_g=0.4; gfx_b=0.0;
+    gfx_drawstr(#val_str2);
 );
 
 function process_knob(x, y, slider_num, min_val, max_val, init_val, title)
@@ -453,6 +514,8 @@ gfx_h < 250 ? (
     process_knob(60,  388, 1, -24, 24, 0.0,   "Pre-band");
     process_knob(275, 388, 2, -24, 24, 0.0,   "Post-band");
     process_knob(490, 388, 3, 0, 100, 100.0,  "Mix");
+
+    process_knob_small(598, 388, 40, "Trim");
 
     gfx_x = 30; gfx_y = 545;
     gfx_r=0.6; gfx_g=0.6; gfx_b=0.6;
