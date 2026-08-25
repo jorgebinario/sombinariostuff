@@ -42,8 +42,9 @@ function f4_process(x) (
 // Filtro corta-DC (1 polo) - blindagem permanente: se qualquer curva
 // (preset ou desenhada a mao) nao passar exatamente por (0,0), esse
 // filtro remove o offset constante antes dele sair como audio.
+// Corte ~20Hz: rapido o suficiente pra nao "tocar" (ring) em transientes.
 function dcblock(x) local(y) (
-    y = x - this.xz1 + 0.9995 * this.yz1;
+    y = x - this.xz1 + 0.997 * this.yz1;
     this.xz1 = x;
     this.yz1 = y;
     y;
