@@ -1,21 +1,16 @@
 desc:SomBinario TubeGlow
 
 // ============================================================
-// SomBinário TubeGlow v1.0 - Saturador Valvulado Dinâmico
+// SomBinário TubeGlow v1.1.1 - Saturador Valvulado Dinâmico
 // Autor: Jorge Araujo (SomBinário)
 //
 // INSTRUÇÕES DE INSTALAÇÃO:
 // Este plugin requer os seguintes arquivos de Impulse Response:
-// - 1.wav (captura @18dB)
-// - 2.wav (captura @40dB)
-// - 3.wav (captura @100dB)
+// - 1.wav
+// - 2.wav
+// - 3.wav
 // Os três arquivos .wav DEVEM ser colocados na MESMA pasta 
 // deste arquivo .jsfx para que o plugin funcione corretamente.
-//
-// NOTAS TÉCNICAS:
-// Capturas originais realizadas a 48kHz. O plugin reamostra 
-// automaticamente as IRs para a sample rate nativa do projeto 
-// (44.1k, 48k, 96k, etc.) via interpolação linear.
 //
 // FLUXO DE SINAL:
 // Convolução (Estágio de Ganho) -> Tone Tilt -> Sag (Dinâmica) 
@@ -108,8 +103,8 @@ function find_tail_idx(buf, len, peak_val, threshold_db)
   last;
 );
 
-TAIL_THRESHOLD_DB = -55; // corta abaixo disso (bem abaixo do ruído de fundo audível)
-TAIL_GUARD = 24; // margem de amostras depois do último ponto significativo
+TAIL_THRESHOLD_DB = -50; // corta abaixo disso - apertado de -55 pra -50 (economia de CPU)
+TAIL_GUARD = 16; // margem depois do ultimo ponto significativo - apertado de 24 pra 16
 
 PEAK_GUARD = 8; // margem de amostras antes do pico, preserva qualquer pré-ataque sutil
 
@@ -997,7 +992,6 @@ draw_logo_box(170,10,260,28);
 // ---- botão HD (canto superior direito) ----
 draw_hd_button(hd_bx,hd_by,hd_bw,hd_bh, hd>0.5, pt_in_rect(mouse_x,mouse_y,hd_bx,hd_by,hd_bw,hd_bh));
 
-// ---- barra de seleção de Material ----
 // ---- barra de seleção de Material (título "VOICING ENGINE" centralizado,
 // com uma linha fina de cada lado - visual de divisor de seção) ----
 voic_cx = mat_bx + mat_bw/2; // centro horizontal da barra
@@ -1031,8 +1025,12 @@ sprintf(#v5,"%.0f%%",sag_amount);
 draw_knob_block(kx_sag,ky_sag,kr_side,sag_amount/100,hov_sag,"SAG",#v5,16,38);
 
 // ---- centro: DRIVE gigante + medidor de Redução de Ganho (Sag) abaixo ----
-sprintf(#v1,"%.0f dB",drive_db);
+// Exibição normalizada (0% a 100%) por baixo dos panos continua usando
+// drive_db real (18-100), que é o que alimenta a convolução/curva - o
+// "0%" na tela é só um jeito mais intuitivo de ler o mínimo, mantendo
+// o timbre real da captura de 18dB intocado.
 drive_norm = (drive_db-18)/(100-18);
+sprintf(#v1,"%.0f%%",drive_norm*100);
 draw_knob_block(kx_drive,ky_drive,kr_drive,drive_norm,hov_drive,"DRIVE",#v1,28,60);
 
 // ---- Sag Gain Reduction ----
