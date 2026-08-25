@@ -36,6 +36,16 @@ function f4_process(x) (
     this.bq2.y;
 );
 
+// Filtro corta-DC (1 polo) - blindagem permanente: se qualquer curva
+// (preset ou desenhada a mao) nao passar exatamente por (0,0), esse
+// filtro remove o offset constante antes dele sair como audio.
+function dcblock(x) local(y) (
+    y = x - this.xz1 + 0.9995 * this.yz1;
+    this.xz1 = x;
+    this.yz1 = y;
+    y;
+);
+
 // =========================================================
 // Motor da curva: spline Catmull-Rom sobre os pontos de
 // controle, pre-calculada numa LUT de alta resolucao
@@ -137,13 +147,15 @@ function apply_preset(id) (
         pts_x[2]=0;     pts_y[2]=0;
         pts_x[3]=0.35;  pts_y[3]=0.98;
         pts_x[4]=1;     pts_y[4]=1;
-    ) : id == 3 ? (                                // Fold (wavefolder)
-        num_pts = 5;
-        pts_x[0]=-1;   pts_y[0]=1;
-        pts_x[1]=-0.5; pts_y[1]=-1;
-        pts_x[2]=0;    pts_y[2]=1;
-        pts_x[3]=0.5;  pts_y[3]=-1;
-        pts_x[4]=1;    pts_y[4]=1;
+    ) : id == 3 ? (                                // Fold (wavefolder, simetrico, passa por 0,0)
+        num_pts = 7;
+        pts_x[0]=-1;    pts_y[0]=-1;
+        pts_x[1]=-0.66; pts_y[1]=1;
+        pts_x[2]=-0.33; pts_y[2]=-1;
+        pts_x[3]=0;     pts_y[3]=0;
+        pts_x[4]=0.33;  pts_y[4]=1;
+        pts_x[5]=0.66;  pts_y[5]=-1;
+        pts_x[6]=1;     pts_y[6]=1;
     ) : id == 4 ? (                                // Stairs (bitcrush)
         num_pts = 8;
         pts_x[0]=-1;    pts_y[0]=-1;
@@ -154,12 +166,12 @@ function apply_preset(id) (
         pts_x[5]=0.49;  pts_y[5]=0.33;
         pts_x[6]=0.51;  pts_y[6]=1;
         pts_x[7]=1;     pts_y[7]=1;
-    ) : (                                          // id 5: Tube (assimetrico)
+    ) : (                                          // id 5: Tube (assimetrico, passa por 0,0)
         num_pts = 5;
         pts_x[0]=-1;   pts_y[0]=-0.85;
-        pts_x[1]=-0.5; pts_y[1]=-0.55;
-        pts_x[2]=0;    pts_y[2]=0.05;
-        pts_x[3]=0.5;  pts_y[3]=0.8;
+        pts_x[1]=-0.5; pts_y[1]=-0.5;
+        pts_x[2]=0;    pts_y[2]=0;
+        pts_x[3]=0.5;  pts_y[3]=0.75;
         pts_x[4]=1;    pts_y[4]=1;
     );
     rebuild_lut();
@@ -235,6 +247,9 @@ os_factor == 1 ? (
     );
     last_spl0 = spl0; last_spl1 = spl1;
 );
+
+out_l = dcb_l.dcblock(out_l);
+out_r = dcb_r.dcblock(out_r);
 
 spl0 = (out_l * post_lin * mix_pct) + (dry_l * (1 - mix_pct));
 spl1 = (out_r * post_lin * mix_pct) + (dry_r * (1 - mix_pct));
