@@ -111,6 +111,25 @@ function shaper_lookup(x) local(idx_f, idx0, idx1, frac, y0n, y1n, y0o, y1o, rbu
     val_old + (val_new - val_old) * morph;
 );
 
+function eval_curve(xv) local(seg, x0, x1, y0, y1, ym1, y2, t) (
+    // Avalia a curva diretamente dos pontos atuais (sem tocar na LUT
+    // de audio) - usado so pro preview visual durante o arrasto, pra
+    // o audio nao precisar reagir a cada posicao intermediaria do mouse.
+    xv <= pts_x[0] ? (
+        pts_y[0];
+    ) : xv >= pts_x[num_pts-1] ? (
+        pts_y[num_pts-1];
+    ) : (
+        seg = find_seg(xv);
+        x0 = pts_x[seg]; x1 = pts_x[seg+1];
+        y0 = pts_y[seg]; y1 = pts_y[seg+1];
+        seg > 0 ? ym1 = pts_y[seg-1] : ym1 = y0;
+        seg < num_pts-2 ? y2 = pts_y[seg+2] : y2 = y1;
+        t = (x1 > x0) ? (xv - x0) / (x1 - x0) : 0;
+        catmull(ym1, y0, y1, y2, t);
+    );
+);
+
 function insert_point(xv, yv) local(i, ins) (
     num_pts < MAX_PTS ? (
         ins = 0;
@@ -442,7 +461,7 @@ gfx_h < 250 ? (
     m_px = 0;
     loop(gfx_w,
         m_xin = (m_px / max(gfx_w-1,1)) * 2.0 - 1.0;
-        m_out = shaper_lookup(m_xin);
+        m_out = eval_curve(m_xin);
         m_out = min(max(m_out, -1.0), 1.0);
         m_py = (gfx_h/2) - (m_out * (gfx_h/2) * 0.9);
         m_px == 0 ? ( gfx_x=m_px; gfx_y=m_py; ) : ( gfx_lineto(m_px, m_py, 1); );
@@ -492,7 +511,6 @@ gfx_h < 250 ? (
                 new_x = min(max(norm_x(mouse_x), -1), 1);
                 new_y = min(max(norm_y(mouse_y), -1), 1);
                 drag_pt = insert_point(new_x, new_y);
-                rebuild_lut();
             );
         );
         (mouse_cap & 2) && last_mouse_cap == 0 && hover_pt > 0 && hover_pt < num_pts-1 ? (
@@ -513,19 +531,13 @@ gfx_h < 250 ? (
         );
         pts_x[drag_pt] = new_x;
         pts_y[drag_pt] = new_y;
-        // throttle: so reconstroi a LUT no maximo a cada 25ms durante o
-        // arrasto continuo, dando tempo do crossfade anterior (20ms)
-        // terminar antes de mexer de novo no buffer "antigo"
-        (time_precise() - last_rebuild_time) >= 0.025 ? (
-            rebuild_lut();
-            last_rebuild_time = time_precise();
-        );
+        // sem rebuild aqui de proposito: o audio so recebe a curva
+        // nova quando o mouse for solto (evita estalos durante o arrasto,
+        // ja que posicoes intermediarias podem ter inclinacao extrema)
     );
 
     mouse_cap == 0 && drag_pt >= 0 ? (
-        // garante que a posicao final do arrasto seja aplicada ao soltar
         rebuild_lut();
-        last_rebuild_time = time_precise();
     );
     mouse_cap == 0 ? ( drag_pt = -1; );
 
@@ -534,7 +546,7 @@ gfx_h < 250 ? (
     px = 0;
     loop(gw,
         xin = -1 + 2*px/(gw-1);
-        yout = shaper_lookup(xin);
+        yout = eval_curve(xin);
         yout = min(max(yout, -1.01), 1.01);
         px == 0 ? ( gfx_x = gx+px; gfx_y = scr_y(yout); ) : ( gfx_lineto(gx+px, scr_y(yout), 1); );
         px += 1;
