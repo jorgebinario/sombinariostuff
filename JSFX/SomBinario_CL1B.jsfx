@@ -1,4 +1,4 @@
-desc:SomBinario CL1B (v1.0)
+desc:SomBinario CL1B v1.0 (SomBinario)
 options: gfx_hz=60
 options: want_all_kb
 
@@ -1402,4 +1402,3 @@ gr_meter = gr_meter_s2;
 // REAPER) - nesse segundo caso, cabe só o medidor de GR, não a UI toda.
 is_embedded = gfx_w < 400 || gfx_h < 200;
 is_embedded ? draw_compact_ui() : draw_full_ui();
-
