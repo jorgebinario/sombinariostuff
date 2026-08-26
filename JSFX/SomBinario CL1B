@@ -1,0 +1,1405 @@
+desc:SomBinario CL1B (v1.0)
+options: gfx_hz=60
+options: want_all_kb
+
+// ============================================================
+// SomBinário CL1B v1.0 - Compressor Óptico Valvulado
+// Autor: Jorge Araujo (SomBinário)
+//
+// Simulação de um compressor óptico valvulado (baseado no Tube-Tech
+// CL 1B), com motor por tabelas de resposta medida do hardware real.
+// Controles: Threshold, Ratio, Attack, Release, A/R Select
+// (Fixed / Fixed+Manual / Manual), Output Gain, Mix e Bypass.
+// ============================================================
+
+slider1:ratio_knob=6.0<2,10,0.1>-Ratio, :1
+slider2:threshold_db=0<-40,10,0.1>-Threshold (dB)
+slider3:attack_knob=5.0<0,10,0.1>-Attack
+slider4:release_knob=5.0<0,10,0.1>-Release
+slider5:ar_select=2<0,2,1{Fixed,Fixed/Manual,Manual}>-A/R Select
+slider6:output_db=0<-24,24,0.1>-Output Gain (dB)
+slider7:mix=100<0,100,1>-Mix (%)
+slider8:bypass=0<0,1,1{Off,On}>-Bypass
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+
+ext_gr_meter = 0.0;
+
+function DB_TO_K(x)
+(
+  10 ^ (x / 20)
+);
+
+function K_TO_DB(x)
+(
+  20 * log10(x)
+);
+
+// for allocator
+__memory_Index__ = 0;
+
+function allocate(size) local(result)
+(
+  result = __memory_Index__;
+   __memory_Index__ += size;
+  result;
+);
+
+// interpolation helpers
+
+M_LN2 = log(2);
+
+function frexp(x) local(sign, a1)
+(
+  sign = 0;
+
+  (x < 0.0) ? (
+    x = -x;
+    sign = 1;
+  );
+
+  frexp_exp = ceil(log(x) / M_LN2);
+
+  a1 = x / pow(2.0, frexp_exp);
+
+  (a1 == 1.0) ? (
+    a1 = 0.5;
+    frexp_exp += 1;
+  );
+
+  sign ? ( a1 = -a1; );
+
+  a1;
+);
+
+function ldexp(a, b)
+(
+  a * pow(2.0, b);
+);
+
+function clamp(x)
+(
+  min(max(x, -0.99999988), 0.99999988);
+);
+
+// ============================================================
+// UI compartilhada (mesmo estilo visual da linha SomBinário: anel de
+// LEDs em quadradinhos ao redor do knob, corpo flat, painéis de
+// agrupamento com cantos arredondados). Portado do TubeGlow v1.2 pra
+// manter o padrão visual entre os plugins da linha.
+// ============================================================
+
+function pt_in_circle(mx, my, cx, cy, r)
+  local(dx, dy)
+(
+  dx = mx-cx; dy = my-cy;
+  (dx*dx + dy*dy) <= r*r;
+);
+
+function pt_in_rect(mx, my, rx, ry, rw, rh)
+(
+  mx >= rx && mx <= rx+rw && my >= ry && my <= ry+rh;
+);
+
+// retângulo com cantos arredondados (corpo + círculos nos cantos),
+// usa a cor atual (gfx_r/g/b/a), sem borda
+function draw_rrect(bx, by, bw, bh, rad)
+(
+  gfx_rect(bx+rad,by,bw-2*rad,bh,1);
+  gfx_rect(bx,by+rad,bw,bh-2*rad,1);
+  gfx_circle(bx+rad,by+rad,rad,1,1);
+  gfx_circle(bx+bw-rad,by+rad,rad,1,1);
+  gfx_circle(bx+rad,by+bh-rad,rad,1,1);
+  gfx_circle(bx+bw-rad,by+bh-rad,rad,1,1);
+);
+
+// painel sutil de agrupamento (levemente mais claro que o fundo, sem borda)
+function draw_panel(bx, by, bw, bh)
+(
+  gfx_r=0.13; gfx_g=0.13; gfx_b=0.13; gfx_a=1;
+  draw_rrect(bx,by,bw,bh,10);
+);
+
+// anel de bolinhas ao redor do knob - acesa = laranja opaco, apagada =
+// laranja translúcido ("adormecida"), acendendo progressivamente
+// conforme o valor sobe (mesma lógica de antes, só que com círculos
+// em vez de quadrados ou de um arco sólido contínuo)
+function draw_led_ring(kx, ky, kr, val01, hovered, nticks)
+  local(i, frac, ang, lit, bx, by)
+(
+  val01 < 0 ? val01 = 0;
+  val01 > 1 ? val01 = 1;
+  i = 0;
+  loop(nticks,
+    frac = nticks > 1 ? i/(nticks-1) : 0;
+    ang = KNOB_ANG_MIN + frac*(KNOB_ANG_MAX-KNOB_ANG_MIN);
+    lit = frac <= val01;
+    gfx_r=0.95; gfx_g=0.6; gfx_b=0.16;
+    lit ? ( gfx_a = hovered ? 1.0 : 0.9; ) : ( gfx_a = 0.13; );
+    bx = kx+kr*sin(ang); by = ky-kr*cos(ang);
+    gfx_circle(bx, by, 3, 1, 1);
+    i += 1;
+  );
+  gfx_a = 1;
+);
+
+// corpo do knob: círculo liso e fosco com ponteiro reto - flat design
+function draw_knob_flat(kx, ky, kr, val01, hovered)
+  local(ang, br)
+(
+  val01 < 0 ? val01 = 0;
+  val01 > 1 ? val01 = 1;
+  br = kr - 12;
+
+  gfx_r=0.17; gfx_g=0.17; gfx_b=0.18; gfx_a=1;
+  gfx_circle(kx,ky,br,1,1);
+
+  ang = KNOB_ANG_MIN + val01*(KNOB_ANG_MAX-KNOB_ANG_MIN);
+  gfx_r=0.95; gfx_g=0.6; gfx_b=0.16;
+  gfx_line(kx,ky, kx+(br-4)*sin(ang), ky-(br-4)*cos(ang), 1);
+  gfx_circle(kx+(br-4)*sin(ang), ky-(br-4)*cos(ang), 2, 1, 1);
+);
+
+// texto do knob: valor abaixo (branco), label acima do anel (cinza claro)
+function draw_knob_text(kx, ky, kr, label, valstr)
+(
+  gfx_setfont(3, "Arial", 10);
+  gfx_r=0.6; gfx_g=0.6; gfx_b=0.62;
+  sprintf(#lbltxt, "%s", label);
+  gfx_x=kx-kr-10; gfx_y=ky-kr-22;
+  gfx_drawstr(#lbltxt, 1, kx+kr+10, ky-kr-6);
+
+  gfx_setfont(3, "Arial", 13);
+  gfx_r=0.97; gfx_g=0.96; gfx_b=0.93;
+  gfx_x=kx-kr-10; gfx_y=ky+kr+8;
+  gfx_drawstr(valstr, 1, kx+kr+10, ky+kr+26);
+);
+
+// knob completo: LED ring + corpo flat + textos
+function draw_knob_block(kx, ky, kr, val01, hovered, label, valstr, nticks)
+(
+  draw_led_ring(kx,ky,kr,val01,hovered,nticks);
+  draw_knob_flat(kx,ky,kr,val01,hovered);
+  draw_knob_text(kx,ky,kr,label,valstr);
+);
+
+// barra horizontal em blocos (Mix) - flat, com alpha no estado apagado
+function draw_hbar(bx, by, bw, bh, val01, hovered, nblocks, label, valstr)
+  local(i, litcount, blockw, gap, lx)
+(
+  val01 < 0 ? val01 = 0;
+  val01 > 1 ? val01 = 1;
+
+  gfx_setfont(3, "Arial", 10);
+  gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
+  sprintf(#hbartxt, "%s", label);
+  gfx_x=bx; gfx_y=by-18;
+  gfx_drawstr(#hbartxt);
+
+  gfx_r=0.97; gfx_g=0.96; gfx_b=0.93;
+  gfx_x=bx; gfx_y=by-18;
+  gfx_drawstr(valstr, 2, bx+bw, by-2);
+
+  litcount = floor(val01*nblocks+0.5);
+  gap=3;
+  blockw = (bw-(nblocks-1)*gap)/nblocks;
+  i=0;
+  loop(nblocks,
+    gfx_r=0.95; gfx_g=0.6; gfx_b=0.16;
+    i<litcount ? ( gfx_a = hovered?1.0:0.9; ) : ( gfx_a = 0.13; );
+    lx = bx+i*(blockw+gap);
+    gfx_rect(lx,by,blockw,bh,1);
+    i += 1;
+  );
+  gfx_a = 1;
+);
+
+// título de módulo (só texto sutil sobre o painel, sem caixa)
+function draw_module_box(bx, by, bw, bh, title)
+(
+  gfx_setfont(3, "Arial", 10);
+  gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
+  sprintf(#modtxt, "%s", title);
+  gfx_x=bx; gfx_y=by+10;
+  gfx_drawstr(#modtxt, 1, bx+bw, by+26);
+);
+
+// caixa de logo/título - texto centrado sobre painel sutil
+function draw_logo_box(bx, by, bw, bh, text)
+(
+  gfx_r=0.13; gfx_g=0.13; gfx_b=0.13; gfx_a=1;
+  draw_rrect(bx,by,bw,bh,10);
+
+  sprintf(#logotxt, "%s", text);
+  gfx_r=0.95; gfx_g=0.62; gfx_b=0.18;
+  gfx_x = bx; gfx_y = by;
+  gfx_drawstr(#logotxt, 1|4, bx+bw, by+bh);
+);
+
+// botão flat no padrão original do CL1B - retângulo reto (sem cantos
+// arredondados), fundo escuro sólido, contorno tingido sutil (alpha
+// baixo) e texto colorido - simétrico e discreto, sem "pílula" cheia
+function draw_toggle_button(bx, by, bw, bh, on, on_r, on_g, on_b, ontext, offtext)
+(
+  gfx_r=0.12; gfx_g=0.12; gfx_b=0.14; gfx_a=1;
+  gfx_rect(bx,by,bw,bh,1);
+
+  on ? ( gfx_r=on_r; gfx_g=on_g; gfx_b=on_b; ) : ( gfx_r=0.3; gfx_g=0.3; gfx_b=0.35; );
+  gfx_a=0.25;
+  gfx_rect(bx,by,bw,bh,0);
+
+  on ? ( gfx_r=on_r; gfx_g=on_g; gfx_b=on_b; ) : ( gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; );
+  gfx_a=1;
+  gfx_setfont(2,"Arial",11,'b');
+  sprintf(#tgltxt, "%s", on ? ontext : offtext);
+  gfx_measurestr(#tgltxt, tgl_tw, tgl_th);
+  gfx_x = bx + bw*0.5 - tgl_tw*0.5;
+  gfx_y = by + bh*0.5 - tgl_th*0.5;
+  gfx_drawstr(#tgltxt);
+);
+
+// nomes dos 3 modos de A/R Select (usados na barra de seletor)
+function set_ar_name(m)
+(
+  m==0 ? sprintf(#artxt, "FIXED");
+  m==1 ? sprintf(#artxt, "FIX/MAN");
+  m==2 ? sprintf(#artxt, "MANUAL");
+);
+
+// barra de seleção A/R - 3 botões, o ativo acende em âmbar
+function draw_ar_bar(bx, by, bw, bh, btnw, gap, active)
+  local(i, ix)
+(
+  i = 0;
+  loop(3,
+    ix = bx + i*(btnw+gap);
+    i==active ? (
+      gfx_r=0.95; gfx_g=0.6; gfx_b=0.16; gfx_a=1;
+    ) : (
+      gfx_r=0.13; gfx_g=0.13; gfx_b=0.13; gfx_a=1;
+    );
+    draw_rrect(ix,by,btnw,bh,6);
+
+    i==active ? ( gfx_r=0.1; gfx_g=0.08; gfx_b=0.07; ) : ( gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; );
+    set_ar_name(i);
+    gfx_x=ix; gfx_y=by;
+    gfx_drawstr(#artxt, 1|4, ix+btnw, by+bh);
+    i += 1;
+  );
+);
+
+KNOB_ANG_MIN = -135 * $pi/180;
+KNOB_ANG_MAX = 135 * $pi/180;
+
+// converte uma string digitada (dígitos, ponto decimal, sinal de menos
+// no início) em número - usado pra edição de parâmetro por teclado
+function parse_float(str_ptr)
+  local(i, len, c, sign, intpart, fracpart, fracdiv, seen_dot)
+(
+  len = strlen(str_ptr);
+  i = 0; sign = 1; intpart = 0; fracpart = 0; fracdiv = 1; seen_dot = 0;
+  (len > 0) && (str_getchar(str_ptr,0) == 45) ? ( sign = -1; i = 1; );
+  while (i < len) (
+    c = str_getchar(str_ptr, i);
+    c == 46 ? (
+      seen_dot = 1;
+    ) : (
+      (c >= 48 && c <= 57) ? (
+        seen_dot ? (
+          fracdiv *= 10;
+          fracpart = fracpart*10 + (c-48);
+        ) : (
+          intpart = intpart*10 + (c-48);
+        );
+      );
+    );
+    i += 1;
+  );
+  sign * (intpart + fracpart/fracdiv);
+);
+
+// acrescenta um caractere (código ASCII) ao fim de uma string
+function append_char(str_ptr, code)
+  local(oldlen)
+(
+  oldlen = strlen(str_ptr);
+  str_setlen(str_ptr, oldlen+1);
+  str_setchar(str_ptr, oldlen, code);
+);
+
+function interpolate_lin(x, table_lin, table_size) local(index_int, index_frac)
+(
+  x = clamp(x);
+
+  (x < 0.0) ?
+    x = 0.0;
+
+  x *= table_size - 1;
+
+  index_int = floor(x);
+
+  (index_int == table_size - 1) ? (
+
+    table_lin[table_size - 1];
+
+  ) : (
+
+    index_frac = x - index_int;
+
+    table_lin[index_int] * (1.0 - index_frac) + table_lin[index_int + 1] * index_frac;
+
+  );
+);
+
+function interpolate_exp(x, table_exp, is_neg) local(exp, mant, index, frac)
+(
+  (is_neg) ? (
+    // table_exp size is [48], with center index 23
+    table_exp += 23;
+  );
+
+  x = clamp(x);
+
+  (x * 1000000 == 0.0) ? (    // ??? WTF with JSFX here ??? (x == 0.0 doesn't work)
+
+    table_exp[23];
+
+  ) : (
+
+    mant = frexp(x);
+    exp = frexp_exp;
+
+    index = 1 - exp;
+
+    (index < 0) ?
+      exp = 0;
+
+    (index > 22) ? (
+      frac = ldexp(mant, 22 + exp);
+      index = 23;
+    ) : (
+      (mant <= 0.0) ? (
+        frac = (mant + 0.5) * 2.0;
+      ) : (
+        frac = (mant - 0.5) * 2.0;
+      );
+    );
+
+    (x < 0.0 && is_neg) ? (
+      index = -index;   // negative index
+
+      frac = frac + 1.0;  // negative frac
+    );
+
+    frac * (table_exp[index] - table_exp[index + 1]) + table_exp[index + 1];
+  );
+);
+
+/*
+ * CLCompressor
+ */
+
+AR_FIXED = 0;
+AR_FIXED_MANUAL = 1;
+AR_MANUAL = 2;
+
+function CLCompressor_setSampleRate() local(lpf1_attack_sec, lpf1_release_sec, lpf2_attack_sec, lpf2_release_sec, release_sec)
+(
+  lpf1_attack_sec = 1.324200 * 0.001;
+  lpf1_release_sec = 1.782562 * 0.001;
+
+  lpf2_attack_sec = 28.011420 * 0.001;
+  lpf2_release_sec = 26.260180 * 0.001;
+
+  release_sec = 5.898;
+
+  this.lpf1_attack = exp(-1.0 / (srate * lpf1_attack_sec));
+  this.lpf1_release = exp(-1.0 / (srate * lpf1_release_sec));
+  this.lpf2_attack = exp(-1.0 / (srate * lpf2_attack_sec));
+  this.lpf2_release = exp(-1.0 / (srate * lpf2_release_sec));
+
+  this.release_k = exp(-1.0 / (srate * release_sec));
+
+  this.post_eq_k = 1.0 - exp(-2.0 * $pi * (20000.0 / srate));
+);
+
+function CLCompressor_reset()
+(
+  this.lpf1_state = 0.0;
+  this.lpf2_state = 0.0;
+
+  this.level_state = 0.0;
+
+  this.post_eq_s1 = 0.0;
+  this.post_eq_s2 = 0.0;
+);
+
+function CLCompressor_setParameters(ratio, threshold_dB, attack_release_mode, attack, release, output_gain_dB)
+(
+  this.T3 = interpolate_exp(ratio, table3_exp, 0);
+  this.T10 = interpolate_exp(ratio, table10_exp, 0);
+  this.T8 = interpolate_lin(attack, table8_lin, 46) * (44100.0 / srate);   // rescale table
+  this.T9 = interpolate_lin(release, table9_lin, 24) * (44100.0 / srate);   // rescale table
+
+  this.T4 = interpolate_lin(this.T3, table4_lin, 24);
+
+  this.attack_release_mode = attack_release_mode;
+
+  this.T7 = DB_TO_K(-40.0 - threshold_dB);    // interpolation table T7 not used
+  this.T11 = DB_TO_K(-30.0 + output_gain_dB); // interpolation table T11 not used
+);
+
+function CLCompressor_processSampleStereo(x1, x2)
+  local(
+    inv_gr, gain_reduction, T5, T6, A1, B1, A2, B2, m1, m2,
+    mult, T2_on, input1, input2, T12_1, T12_2, level_1, combined_level,
+    T13, lpf1_k, lpf2_k, y1, y2
+  )
+(
+  // feedback signal path
+  inv_gr = this.lpf1_state * 0.2998201 + this.lpf2_state * 0.079904087;
+
+  gain_reduction = 0.0029900903 / clamp(inv_gr + 0.0029900903);
+
+  // feedback sidechain path
+
+  T5 = interpolate_exp(inv_gr, table5_exp, 0);
+  T6 = interpolate_lin(T5, table6_lin, 24);
+
+  A1 = 0.01193628;
+  B1 = 0.9323384;
+  A2 = 0.4595526;
+  B2 = 1.0;
+
+  m1 = (A1 * T6 + B1 * (1.0 - T6));
+  m2 = (A2 * T6 + B2 * (1.0 - T6));
+
+  mult = m1 * (1.0 - this.T4) + m2 * this.T4;
+
+  T2_on = 0.08098298;
+
+  // detector path
+  input1 = (x1 * T2_on) * mult * this.T7;
+  input2 = (x2 * T2_on) * mult * this.T7;
+
+  T12_1 = interpolate_exp(input1, table12_exp_neg, 1);
+  T12_2 = interpolate_exp(input2, table12_exp_neg, 1);
+
+  level_1 = max(abs(T12_1), abs(T12_2));    // stereo-link
+
+  (this.attack_release_mode != AR_FIXED) ? (
+    // attack/release
+    (level_1 >= this.level_state) ? (
+      // attack
+      this.level_state = min(this.level_state + this.T8, level_1);
+    ) : (
+      // release
+      this.level_state = max(this.level_state * this.release_k - this.T9, level_1);
+    );
+  );
+
+  (this.attack_release_mode == AR_FIXED) ? (
+    combined_level = level_1;
+  ) : (
+    (this.attack_release_mode == AR_MANUAL) ? (
+      combined_level = this.level_state;
+    ) : (
+      combined_level = max(level_1, this.level_state);
+    );
+  );
+
+  T13 = interpolate_lin(combined_level, table13_lin, 252);
+
+  // lpf1
+  lpf1_k = (T13 > this.lpf1_state) ? this.lpf1_attack : this.lpf1_release;
+
+  this.lpf1_state = T13 + (this.lpf1_state - T13) * lpf1_k;
+
+  // lpf2
+  lpf2_k = (T13 > this.lpf2_state) ? this.lpf2_attack : this.lpf2_release;
+
+  this.lpf2_state = T13 + (this.lpf2_state - T13) * lpf2_k;
+
+  // output
+  y1 = x1 * this.T10 * this.T11 * gain_reduction * 33.768673;
+  y2 = x2 * this.T10 * this.T11 * gain_reduction * 33.768673;
+
+  this.gr = gain_reduction;
+
+  // post_eq
+  this.post_eq_s1 += (y1 - this.post_eq_s1) * this.post_eq_k;
+  this.post_eq_s2 += (y2 - this.post_eq_s2) * this.post_eq_k;
+
+  this.y1 = this.post_eq_s1;
+  this.y2 = this.post_eq_s2;
+);
+
+//=========== table of measured values ============
+
+function init_tables() local(i)
+(
+  // T3
+  table3_exp = allocate(25);
+  table3_exp[0] = 0.999999;
+  table3_exp[1] = 0.99;
+  table3_exp[2] = 0.5626293;
+  table3_exp[3] = 0.2993541;
+  table3_exp[4] = 0.1536661;
+  table3_exp[5] = 0.07558671;
+  table3_exp[6] = 0.036547;
+  table3_exp[7] = 0.01702715;
+
+  i = 8;
+  loop(25 - 8,
+    table3_exp[i] = 0.01;
+    i += 1;
+  );
+
+  // T4
+  table4_lin = allocate(24);
+  table4_lin[0] = 0;
+  table4_lin[1] = 0.03416149;
+  table4_lin[2] = 0.07852706;
+  table4_lin[3] = 0.1228926;
+  table4_lin[4] = 0.1672582;
+  table4_lin[5] = 0.2116238;
+  table4_lin[6] = 0.2559893;
+  table4_lin[7] = 0.3003549;
+  table4_lin[8] = 0.3447205;
+  table4_lin[9] = 0.3890861;
+  table4_lin[10] = 0.4334517;
+  table4_lin[11] = 0.4778172;
+  table4_lin[12] = 0.5221828;
+  table4_lin[13] = 0.5665483;
+  table4_lin[14] = 0.6109139;
+  table4_lin[15] = 0.6552795;
+  table4_lin[16] = 0.6996451;
+  table4_lin[17] = 0.7440106;
+  table4_lin[18] = 0.7883762;
+  table4_lin[19] = 0.8327418;
+  table4_lin[20] = 0.8771074;
+  table4_lin[21] = 0.921473;
+  table4_lin[22] = 0.9658385;
+  table4_lin[23] = 0.999999;
+
+  // T5
+  table5_exp = allocate(25);
+  table5_exp[0] = 0.01;
+  table5_exp[1] = 1;
+  table5_exp[2] = 0.9947661;
+  table5_exp[3] = 0.9844928;
+  table5_exp[4] = 0.9651101;
+  table5_exp[5] = 0.9302186;
+  table5_exp[6] = 0.8630559;
+  table5_exp[7] = 0.755419;
+  table5_exp[8] = 0.6082814;
+  table5_exp[9] = 0.4397123;
+  table5_exp[10] = 0.2796561;
+  table5_exp[11] = 0.162245;
+  table5_exp[12] = 0.08780019;
+  table5_exp[13] = 0.04508;
+  table5_exp[14] = 0.02209106;
+  table5_exp[15] = 0.01019185;
+  table5_exp[16] = 0.004130001;
+  table5_exp[17] = 0.001069335;
+  table5_exp[18] = 0.00001000000;
+  table5_exp[19] = 0.00001000000;
+  table5_exp[20] = 0.00001000000;
+  table5_exp[21] = 0.00001000000;
+  table5_exp[22] = 0.00001000000;
+  table5_exp[23] = 0.00001000000;
+  table5_exp[24] = 0.00001000000;
+
+  // T6
+  table6_lin = allocate(24);
+  table6_lin[0] = 0;
+  table6_lin[1] = 0.0434687;
+  table6_lin[2] = 0.08694739;
+  table6_lin[3] = 0.1304261;
+  table6_lin[4] = 0.1739048;
+  table6_lin[5] = 0.2173835;
+  table6_lin[6] = 0.2608622;
+  table6_lin[7] = 0.3043409;
+  table6_lin[8] = 0.3478196;
+  table6_lin[9] = 0.3912983;
+  table6_lin[10] = 0.434777;
+  table6_lin[11] = 0.4782557;
+  table6_lin[12] = 0.5217344;
+  table6_lin[13] = 0.565213;
+  table6_lin[14] = 0.6086918;
+  table6_lin[15] = 0.6521704;
+  table6_lin[16] = 0.6956491;
+  table6_lin[17] = 0.7391278;
+  table6_lin[18] = 0.7826065;
+  table6_lin[19] = 0.8260852;
+  table6_lin[20] = 0.8695639;
+  table6_lin[21] = 0.9130426;
+  table6_lin[22] = 0.9565213;
+  table6_lin[23] = 0.999999;
+
+  // T7: not used (threshold)
+
+  // T8
+  table8_lin = allocate(46);
+
+  i = 0;
+  loop(11,
+    table8_lin[i] = 0.002257127;
+    i += 1;
+  );
+
+  table8_lin[11] = 0.000807641;
+  table8_lin[12] = 0.0002590034;
+  table8_lin[13] = 0.0001466583;
+  table8_lin[14] = 0.000105361;
+  table8_lin[15] = 0.00008688696;
+  table8_lin[16] = 0.00007712693;
+  table8_lin[17] = 0.00007082194;
+  table8_lin[18] = 0.00006535164;
+  table8_lin[19] = 0.00005942077;
+  table8_lin[20] = 0.00005248035;
+  table8_lin[21] = 0.00004474115;
+  table8_lin[22] = 0.00003699339;
+  table8_lin[23] = 0.00002985739;
+  table8_lin[24] = 0.00002377450;
+  table8_lin[25] = 0.00001915936;
+  table8_lin[26] = 0.00001565825;
+  table8_lin[27] = 0.00001302099;
+  table8_lin[28] = 0.00001102717;
+  table8_lin[29] = 0.000009554097;
+  table8_lin[30] = 0.000008418394;
+  table8_lin[31] = 0.000007519858;
+  table8_lin[32] = 0.000006788958;
+  table8_lin[33] = 0.000006188009;
+  table8_lin[34] = 0.000005677829;
+  table8_lin[35] = 0.000005232528;
+  table8_lin[36] = 0.000004838532;
+  table8_lin[37] = 0.000004491788;
+  table8_lin[38] = 0.000004193505;
+  table8_lin[39] = 0.000003938723;
+  table8_lin[40] = 0.000003725471;
+  table8_lin[41] = 0.000003552736;
+  table8_lin[42] = 0.000003421820;
+  table8_lin[43] = 0.000003326748;
+  table8_lin[44] = 0.000003267550;
+  table8_lin[45] = 0.000003245660;
+
+  // T9
+  table9_lin = allocate(24);
+  table9_lin[0] = 0.00004848326;
+  table9_lin[1] = 0.00004848326;
+  table9_lin[2] = 0.00004848326;
+  table9_lin[3] = 0.00004188835;
+  table9_lin[4] = 0.00002785662;
+  table9_lin[5] = 0.00001560057;
+  table9_lin[6] = 0.00001201397;
+  table9_lin[7] = 0.000008427365;
+  table9_lin[8] = 0.000005328864;
+  table9_lin[9] = 0.000004453937;
+  table9_lin[10] = 0.000003579009;
+  table9_lin[11] = 0.000002704082;
+  table9_lin[12] = 0.000002101815;
+  table9_lin[13] = 0.000001772209;
+  table9_lin[14] = 0.000001442603;
+  table9_lin[15] = 0.000001112997;
+  table9_lin[16] = 8.481028*10^-7;
+  table9_lin[17] = 6.281776*10^-7;
+  table9_lin[18] = 4.082524*10^-7;
+  table9_lin[19] = 2.060375*10^-7;
+  table9_lin[20] = 1.126142*10^-7;
+  table9_lin[21] = 1.919095*10^-8;
+  table9_lin[22] = 3.280834*10^-10;
+  table9_lin[23] = -4.332800*10^-9;
+
+  // T10
+  table10_exp = allocate(25);
+  table10_exp[0] = 0.8766871;
+  table10_exp[1] = 0.8766871;
+  table10_exp[2] = 0.9343757;
+  table10_exp[3] = 0.966794;
+  table10_exp[4] = 0.9838194;
+  table10_exp[5] = 0.9926132;
+  table10_exp[6] = 0.9970101;
+  table10_exp[7] = 0.9992085;
+
+  i = 8;
+  loop(25 - 8,
+    table10_exp[i] = 1;
+    i += 1;
+  );
+
+  // T11: not used (output gain)
+
+  // T12
+  table12_exp_neg = allocate(48);
+  table12_exp_neg[0] = 0.000002987261;
+  table12_exp_neg[1] = 0.000005974523;
+  table12_exp_neg[2] = 0.00001194905;
+  table12_exp_neg[3] = 0.00002389809;
+  table12_exp_neg[4] = 0.00004779618;
+  table12_exp_neg[5] = 0.00009559237;
+  table12_exp_neg[6] = 0.0001911847;
+  table12_exp_neg[7] = 0.0003823695;
+  table12_exp_neg[8] = 0.0007647389;
+  table12_exp_neg[9] = 0.001529478;
+  table12_exp_neg[10] = 0.003058956;
+  table12_exp_neg[11] = 0.006117912;
+  table12_exp_neg[12] = 0.01223582;
+  table12_exp_neg[13] = 0.02447165;
+  table12_exp_neg[14] = 0.04894329;
+  table12_exp_neg[15] = 0.09788658;
+  table12_exp_neg[16] = 0.1957732;
+  table12_exp_neg[17] = 0.3915463;
+  table12_exp_neg[18] = 0.7830927;
+  table12_exp_neg[19] = 1;
+  table12_exp_neg[20] = 1;
+  table12_exp_neg[21] = 1;
+  table12_exp_neg[22] = 1;
+  table12_exp_neg[23] = 1;
+  table12_exp_neg[24] = 1;
+  table12_exp_neg[25] = 1;
+  table12_exp_neg[26] = 1;
+  table12_exp_neg[27] = 1;
+  table12_exp_neg[28] = 1;
+  table12_exp_neg[29] = 0.7810927;
+  table12_exp_neg[30] = 0.3895463;
+  table12_exp_neg[31] = 0.1937732;
+  table12_exp_neg[32] = 0.09588659;
+  table12_exp_neg[33] = 0.04694329;
+  table12_exp_neg[34] = 0.02247165;
+  table12_exp_neg[35] = 0.01023582;
+  table12_exp_neg[36] = 0.004117912;
+  table12_exp_neg[37] = 0.001058956;
+  table12_exp_neg[38] = 0;
+  table12_exp_neg[39] = 0;
+  table12_exp_neg[40] = 0;
+  table12_exp_neg[41] = 0;
+  table12_exp_neg[42] = 0;
+  table12_exp_neg[43] = 0;
+  table12_exp_neg[44] = 0;
+  table12_exp_neg[45] = 0;
+  table12_exp_neg[46] = 0;
+  table12_exp_neg[47] = 0;
+
+  // T13
+  table13_lin = allocate(252);
+  table13_lin[0] = 0;
+  table13_lin[1] = 0.002895139;
+  table13_lin[2] = 0.01001967;
+  table13_lin[3] = 0.01859283;
+  table13_lin[4] = 0.0278201;
+  table13_lin[5] = 0.03739988;
+  table13_lin[6] = 0.04719125;
+  table13_lin[7] = 0.05711957;
+  table13_lin[8] = 0.06714159;
+  table13_lin[9] = 0.07723056;
+  table13_lin[10] = 0.087369;
+  table13_lin[11] = 0.09754504;
+  table13_lin[12] = 0.1077503;
+  table13_lin[13] = 0.1179788;
+  table13_lin[14] = 0.1282261;
+  table13_lin[15] = 0.1384886;
+  table13_lin[16] = 0.1487638;
+  table13_lin[17] = 0.1590496;
+  table13_lin[18] = 0.1693444;
+  table13_lin[19] = 0.1796468;
+  table13_lin[20] = 0.1899559;
+  table13_lin[21] = 0.2002707;
+  table13_lin[22] = 0.2105905;
+  table13_lin[23] = 0.2209146;
+  table13_lin[24] = 0.2312426;
+  table13_lin[25] = 0.2415741;
+  table13_lin[26] = 0.2519086;
+  table13_lin[27] = 0.2622458;
+  table13_lin[28] = 0.2725855;
+  table13_lin[29] = 0.2829274;
+  table13_lin[30] = 0.2932713;
+  table13_lin[31] = 0.303617;
+  table13_lin[32] = 0.3139643;
+  table13_lin[33] = 0.3243132;
+  table13_lin[34] = 0.3346635;
+  table13_lin[35] = 0.345015;
+  table13_lin[36] = 0.3553677;
+  table13_lin[37] = 0.3657215;
+  table13_lin[38] = 0.3760763;
+  table13_lin[39] = 0.3864319;
+  table13_lin[40] = 0.3967885;
+  table13_lin[41] = 0.4071458;
+  table13_lin[42] = 0.4175039;
+  table13_lin[43] = 0.4278626;
+  table13_lin[44] = 0.4382221;
+  table13_lin[45] = 0.4485821;
+  table13_lin[46] = 0.4589426;
+  table13_lin[47] = 0.4693037;
+  table13_lin[48] = 0.4796653;
+  table13_lin[49] = 0.4900274;
+  table13_lin[50] = 0.5003899;
+  table13_lin[51] = 0.5107529;
+  table13_lin[52] = 0.5211161;
+  table13_lin[53] = 0.5314798;
+  table13_lin[54] = 0.5418439;
+  table13_lin[55] = 0.5522082;
+  table13_lin[56] = 0.562573;
+  table13_lin[57] = 0.5729379;
+  table13_lin[58] = 0.5833032;
+  table13_lin[59] = 0.5936688;
+  table13_lin[60] = 0.6040345;
+  table13_lin[61] = 0.6144006;
+  table13_lin[62] = 0.6247668;
+  table13_lin[63] = 0.6351333;
+  table13_lin[64] = 0.6455;
+  table13_lin[65] = 0.6558669;
+  table13_lin[66] = 0.666234;
+  table13_lin[67] = 0.6766013;
+  table13_lin[68] = 0.6869688;
+  table13_lin[69] = 0.6973364;
+  table13_lin[70] = 0.7077042;
+  table13_lin[71] = 0.7180721;
+  table13_lin[72] = 0.7284402;
+  table13_lin[73] = 0.7388085;
+  table13_lin[74] = 0.7491769;
+  table13_lin[75] = 0.7595453;
+  table13_lin[76] = 0.769914;
+  table13_lin[77] = 0.7802827;
+  table13_lin[78] = 0.7906516;
+  table13_lin[79] = 0.8010206;
+  table13_lin[80] = 0.8113897;
+  table13_lin[81] = 0.8217589;
+  table13_lin[82] = 0.8321282;
+  table13_lin[83] = 0.8424976;
+  table13_lin[84] = 0.8528671;
+  table13_lin[85] = 0.8632367;
+  table13_lin[86] = 0.8736063;
+  table13_lin[87] = 0.883976;
+  table13_lin[88] = 0.8943459;
+  table13_lin[89] = 0.9047158;
+  table13_lin[90] = 0.9150858;
+  table13_lin[91] = 0.9254559;
+  table13_lin[92] = 0.935826;
+  table13_lin[93] = 0.9461962;
+  table13_lin[94] = 0.9565665;
+  table13_lin[95] = 0.9669368;
+  table13_lin[96] = 0.9773072;
+  table13_lin[97] = 0.9876777;
+  table13_lin[98] = 0.9980482;
+
+  i = 99;
+  loop(252 - 99,
+    table13_lin[i] = 1;
+    i += 1;
+  );
+
+);
+
+init_tables();
+
+// Recalcula os parâmetros do motor a partir dos sliders atuais.
+// Chamada tanto em @slider (mudanças via host/automação) quanto
+// diretamente pelo código de mouse em @gfx (mudanças via GUI custom),
+// pra garantir efeito IMEDIATO independentemente de o host reprocessar
+// ou não o bloco @slider a partir de slider_automate().
+function update_engine()
+(
+  effect.CLCompressor_setParameters(
+    (ratio_knob - 2.0) / 8.0,  // 2..10 -> 0..1
+    threshold_db,
+    ar_select,                  // 0=Fixed, 1=Fixed/Manual, 2=Manual
+    attack_knob * 0.1,          // 0..10 -> 0..1
+    release_knob * 0.1,         // 0..10 -> 0..1
+    output_db
+  );
+);
+
+// Recalcula wet/dry a partir do Mix - chamada tanto em @slider quanto
+// direto no @gfx (mesma lógica de atualização imediata do update_engine).
+function update_mix()
+(
+  wet = mix / 100;
+  dry = 1 - wet;
+);
+
+(sample_rate != srate) ? (
+  effect.CLCompressor_setSampleRate();
+  sample_rate = srate;
+);
+
+effect.CLCompressor_reset();
+
+// --- VU/GR meter: modelo de 2 polos em cascata (aprox. VU mecânico ANSI C16.5) ---
+// tau escolhido para ~300ms de subida até 99% de um degrau (padrão de VU real).
+vu_tau = 0.0452;
+vu_k = exp(-1.0 / (max(1, srate) * vu_tau));
+
+gr_meter_s1 = 0.0;
+gr_meter_s2 = 0.0;
+gr_meter = 0.0;
+
+// pico de redução de ganho por bloco - alimenta o medidor NATIVO do
+// REAPER (ext_gr_meter), independente do VU visual do plugin
+hold_max_gr = 1.0;
+
+// estado de interação da UI (arraste de knob/barra, duplo-clique pra reset)
+drag_knob = 0;      // 0 = nenhum, 1-6 = índice do controle sendo arrastado
+drag_start_y = 0;
+drag_start_val = 0;
+prev_left_down = 0;
+prev_right_down = 0;
+last_click_target = 0;
+last_click_time = 0;
+
+// estado de edição de valor por teclado (clicar no número embaixo do knob)
+edit_target = 0;    // 0 = nenhum, 1-6 = qual controle está sendo editado
+edit_str = "";
+
+// ---- UI compacta (medidor de GR embutido no TCP/MCP do REAPER) ----
+// Quando o usuário ativa "Show embedded UI in MCP"/"...in TCP" na faixa,
+// o REAPER chama @gfx com uma janela BEM menor que a do plugin normal
+// (a área do medidor da faixa/mixer, não a janela completa). Detectamos
+// esse caso pelo tamanho recebido e, em vez de tentar encaixar a UI
+// inteira (que não cabe), desenhamos só uma barra de redução de ganho.
+function draw_compact_ui()
+  local(gr_norm, mgn, bar_x, bar_y, bar_w, bar_h, fill_w, fill_h, fsize)
+(
+  gfx_r = 0.06; gfx_g = 0.06; gfx_b = 0.07; gfx_a = 1;
+  gfx_rect(0, 0, gfx_w, gfx_h, 1);
+
+  gr_norm = min(1, gr_meter / 24);
+  mgn = 2;
+  bar_x = mgn; bar_y = mgn;
+  bar_w = gfx_w - mgn*2; bar_h = gfx_h - mgn*2;
+
+  gfx_r=0.15; gfx_g=0.15; gfx_b=0.16; gfx_a=1;
+  gfx_rect(bar_x, bar_y, bar_w, bar_h, 1);
+
+  gfx_r=0.95; gfx_g=0.6; gfx_b=0.16; gfx_a=1;
+  gfx_w >= gfx_h ? (
+    // faixa larga e baixa (típico de TCP) - a barra enche da esquerda
+    fill_w = bar_w * gr_norm;
+    gfx_rect(bar_x, bar_y, fill_w, bar_h, 1);
+  ) : (
+    // faixa estreita e alta (típico de tira estreita de MCP) - enche de baixo pra cima
+    fill_h = bar_h * gr_norm;
+    gfx_rect(bar_x, bar_y + bar_h - fill_h, bar_w, fill_h, 1);
+  );
+
+  // rótulo "GR" com o valor em dB, só se tiver espaço legível
+  (gfx_w > 46 && gfx_h > 12) ? (
+    fsize = max(8, min(11, floor(gfx_h*0.5)));
+    gfx_setfont(3, "Arial", fsize);
+    gfx_r=1; gfx_g=1; gfx_b=1; gfx_a=0.92;
+    sprintf(#embtxt, "GR %.1f", gr_db);
+    gfx_x = bar_x+3; gfx_y = bar_y + bar_h*0.5 - fsize*0.5;
+    gfx_drawstr(#embtxt);
+  );
+);
+
+// ---- UI completa (janela normal do plugin) ----
+function draw_full_ui()
+(
+
+// trava a fonte explicitamente
+gfx_setfont(1, "Arial", 15);
+
+// --- PALETA DE CORES DARK MODE ---
+c_bg_r = 0.08; c_bg_g = 0.08; c_bg_b = 0.09;
+c_txt_r = 0.65; c_txt_g = 0.65; c_txt_b = 0.70;
+
+gfx_r = c_bg_r; gfx_g = c_bg_g; gfx_b = c_bg_b; gfx_a = 1;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// --- DETALHES DO CHASSI (abas de rack sutis) ---
+gfx_r = 0.05; gfx_g = 0.05; gfx_b = 0.06;
+gfx_rect(0, 0, 24, gfx_h);
+gfx_rect(gfx_w - 24, 0, 24, gfx_h);
+
+// ---- estado do mouse (uma vez por frame) ----
+left_down = (mouse_cap&1) != 0;
+just_pressed = left_down && !prev_left_down;
+shift_held = (mouse_cap&8) != 0;
+alt_held = (mouse_cap&16) != 0;
+
+// ---- MESMAS posições/coordenadas do CL1B original ----
+col1 = 250;  // Gain / Attack
+col2 = 360;  // Ratio / Release
+col3 = 470;  // Threshold / A-R Select
+col4 = 570;  // Mix
+col5 = 725;  // Bypass
+row1 = 110;
+row2 = 230;
+kr_side = 32;
+
+vu_x = 640; vu_y = 60; vu_w = 170; vu_h = 100;
+
+ar_bw = 96; ar_bh = 28;
+ar_bx = col3 - ar_bw*0.5; ar_by = row2 - ar_bh*0.5;
+
+byp_bw = 76; byp_bh = 28;
+byp_bx = col5 - byp_bw*0.5; byp_by = row2 - byp_bh*0.5;
+
+// ---- um único bloco cinza, envolvendo tudo ----
+draw_panel(26, 30, 804, 280);
+
+// ---- título (sobre o bloco da esquerda) ----
+gfx_r = 1; gfx_g = 1; gfx_b = 1; gfx_a = 1;
+gfx_setfont(1, "Arial", 22, 'b');
+gfx_x = 45; gfx_y = 120;
+gfx_drawstr("SOMBINÁRIO");
+
+gfx_setfont(2, "Arial", 13, 'b');
+gfx_r = c_txt_r; gfx_g = c_txt_g; gfx_b = c_txt_b;
+gfx_x = 45; gfx_y = 150;
+gfx_drawstr("COMPRESSOR CL 1B");
+
+gfx_setfont(3, "Arial", 11);
+gfx_x = 45; gfx_y = 168;
+gfx_drawstr("OPTICAL TUBE DYNAMICS");
+
+bypass_on ? (
+  gfx_setfont(2, "Arial", 13, 'b');
+  gfx_r = 0.95; gfx_g = 0.50; gfx_b = 0.05;
+  gfx_x = 45; gfx_y = 195;
+  gfx_drawstr("[ BYPASSED ]");
+);
+
+// ---- detecta clique: Alt+clique ou duplo-clique reseta pro padrão;
+// clique normal inicia o arraste (todos os 6 controles principais são
+// knobs, incluindo Mix - como no CL1B original) ----
+just_pressed ? (
+  // se já havia edição em andamento, confirma o valor digitado antes
+  // de processar este novo clique (evita perder o que foi digitado)
+  edit_target != 0 ? (
+    typed_val = parse_float(#edit_str);
+    edit_target==1 ? ( slider(6) = min(24, max(-24, typed_val)); slider_automate(output_db); );
+    edit_target==2 ? ( slider(1) = min(10, max(2, typed_val)); slider_automate(ratio_knob); );
+    edit_target==3 ? ( slider(2) = min(10, max(-40, typed_val)); slider_automate(threshold_db); );
+    edit_target==4 ? ( slider(7) = min(100, max(0, typed_val)); slider_automate(mix); update_mix(); );
+    edit_target==5 ? ( slider(3) = min(10, max(0, typed_val)); slider_automate(attack_knob); );
+    edit_target==6 ? ( slider(4) = min(10, max(0, typed_val)); slider_automate(release_knob); );
+    edit_target != 4 ? update_engine();
+    edit_target = 0;
+  );
+
+  target_id = 0;
+  pt_in_circle(mouse_x,mouse_y,col1,row1,kr_side) ? target_id = 1;  // Gain
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,col2,row1,kr_side) ? target_id = 2;  // Ratio
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,col3,row1,kr_side) ? target_id = 3;  // Threshold
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,col4,row1,kr_side) ? target_id = 4;  // Mix
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,col1,row2,kr_side) ? target_id = 5;  // Attack
+  target_id==0 && pt_in_circle(mouse_x,mouse_y,col2,row2,kr_side) ? target_id = 6;  // Release
+
+  target_id != 0 ? (
+    is_dblclick = (target_id == last_click_target) && (time_precise()-last_click_time < 0.35);
+
+    (alt_held || is_dblclick) ? (
+      target_id==1 ? ( slider(6) = 0;   slider_automate(output_db); );
+      target_id==2 ? ( slider(1) = 6.0; slider_automate(ratio_knob); );
+      target_id==3 ? ( slider(2) = 0;   slider_automate(threshold_db); );
+      target_id==4 ? ( slider(7) = 100; slider_automate(mix); update_mix(); );
+      target_id==5 ? ( slider(3) = 5.0; slider_automate(attack_knob); );
+      target_id==6 ? ( slider(4) = 5.0; slider_automate(release_knob); );
+      update_engine();
+      drag_knob = 0;
+    ) : (
+      drag_knob = target_id;
+      drag_start_y = mouse_y;
+      target_id==1 ? drag_start_val = (output_db+24)/48;
+      target_id==2 ? drag_start_val = (ratio_knob-2)/8;
+      target_id==3 ? drag_start_val = (threshold_db+40)/50;
+      target_id==4 ? drag_start_val = mix/100;
+      target_id==5 ? drag_start_val = attack_knob/10;
+      target_id==6 ? drag_start_val = release_knob/10;
+    );
+
+    last_click_target = target_id;
+    last_click_time = time_precise();
+  ) : (
+    drag_knob = 0;
+    // A/R Select: um único botão, clique cicla Fixed -> Fixed/Manual -> Manual
+    pt_in_rect(mouse_x,mouse_y,ar_bx,ar_by,ar_bw,ar_bh) ? (
+      slider(5) = (ar_select + 1) % 3;
+      slider_automate(ar_select);
+      update_engine();
+    );
+    // Bypass: toggle liga/desliga
+    pt_in_rect(mouse_x,mouse_y,byp_bx,byp_by,byp_bw,byp_bh) ? (
+      slider(8) = bypass_on ? 0 : 1;
+      slider_automate(bypass);
+      bypass_on = bypass >= 0.5;
+    );
+  );
+);
+
+// ---- botão direito num knob: abre edição do valor por teclado ----
+right_down = (mouse_cap & 2) != 0;
+just_right_pressed = right_down && !prev_right_down;
+
+just_right_pressed ? (
+  rt_target = 0;
+  pt_in_circle(mouse_x,mouse_y,col1,row1,kr_side) ? rt_target = 1;  // Gain
+  rt_target==0 && pt_in_circle(mouse_x,mouse_y,col2,row1,kr_side) ? rt_target = 2;  // Ratio
+  rt_target==0 && pt_in_circle(mouse_x,mouse_y,col3,row1,kr_side) ? rt_target = 3;  // Threshold
+  rt_target==0 && pt_in_circle(mouse_x,mouse_y,col4,row1,kr_side) ? rt_target = 4;  // Mix
+  rt_target==0 && pt_in_circle(mouse_x,mouse_y,col1,row2,kr_side) ? rt_target = 5;  // Attack
+  rt_target==0 && pt_in_circle(mouse_x,mouse_y,col2,row2,kr_side) ? rt_target = 6;  // Release
+
+  rt_target != 0 ? (
+    edit_target = rt_target;
+    drag_knob = 0;
+    rt_target==1 ? sprintf(#edit_str, "%.1f", output_db);
+    rt_target==2 ? sprintf(#edit_str, "%.1f", ratio_knob);
+    rt_target==3 ? sprintf(#edit_str, "%.1f", threshold_db);
+    rt_target==4 ? sprintf(#edit_str, "%.0f", mix);
+    rt_target==5 ? sprintf(#edit_str, "%.1f", attack_knob);
+    rt_target==6 ? sprintf(#edit_str, "%.1f", release_knob);
+  );
+);
+
+prev_right_down = right_down;
+
+// ---- edição de valor por teclado (enquanto edit_target != 0) ----
+edit_target != 0 ? (
+  kb_char = gfx_getchar();
+  while (kb_char != 0) (
+    kb_char == 13 ? (
+      // Enter: confirma
+      typed_val = parse_float(#edit_str);
+      edit_target==1 ? ( slider(6) = min(24, max(-24, typed_val)); slider_automate(output_db); );
+      edit_target==2 ? ( slider(1) = min(10, max(2, typed_val)); slider_automate(ratio_knob); );
+      edit_target==3 ? ( slider(2) = min(10, max(-40, typed_val)); slider_automate(threshold_db); );
+      edit_target==4 ? ( slider(7) = min(100, max(0, typed_val)); slider_automate(mix); update_mix(); );
+      edit_target==5 ? ( slider(3) = min(10, max(0, typed_val)); slider_automate(attack_knob); );
+      edit_target==6 ? ( slider(4) = min(10, max(0, typed_val)); slider_automate(release_knob); );
+      edit_target != 4 ? update_engine();
+      edit_target = 0;
+    ) : kb_char == 27 ? (
+      // Escape: cancela, descarta o que foi digitado
+      edit_target = 0;
+    ) : kb_char == 8 ? (
+      // Backspace
+      strlen(#edit_str) > 0 ? str_setlen(#edit_str, strlen(#edit_str)-1);
+    ) : (
+      // aceita dígitos, ponto decimal, e sinal de menos só no início
+      ((kb_char >= 48 && kb_char <= 57) || kb_char == 46 || (kb_char == 45 && strlen(#edit_str) == 0)) ?
+        append_char(#edit_str, kb_char);
+    );
+    kb_char = gfx_getchar();
+  );
+);
+
+// ---- scroll do mouse ----
+mouse_wheel != 0 ? (
+  wheel_notches = mouse_wheel / 120;
+  mouse_wheel = 0;
+
+  pt_in_circle(mouse_x,mouse_y,col1,row1,kr_side) ? (
+    slider(6) = min(24, max(-24, output_db + wheel_notches*0.5));
+    slider_automate(output_db); update_engine();
+  );
+  pt_in_circle(mouse_x,mouse_y,col2,row1,kr_side) ? (
+    slider(1) = min(10, max(2, ratio_knob + wheel_notches*0.1));
+    slider_automate(ratio_knob); update_engine();
+  );
+  pt_in_circle(mouse_x,mouse_y,col3,row1,kr_side) ? (
+    slider(2) = min(10, max(-40, threshold_db + wheel_notches*0.5));
+    slider_automate(threshold_db); update_engine();
+  );
+  pt_in_circle(mouse_x,mouse_y,col4,row1,kr_side) ? (
+    slider(7) = min(100, max(0, mix + wheel_notches*2));
+    slider_automate(mix); update_mix();
+  );
+  pt_in_circle(mouse_x,mouse_y,col1,row2,kr_side) ? (
+    slider(3) = min(10, max(0, attack_knob + wheel_notches*0.1));
+    slider_automate(attack_knob); update_engine();
+  );
+  pt_in_circle(mouse_x,mouse_y,col2,row2,kr_side) ? (
+    slider(4) = min(10, max(0, release_knob + wheel_notches*0.1));
+    slider_automate(release_knob); update_engine();
+  );
+);
+
+// ---- atualiza o valor do knob sendo arrastado ----
+(left_down && drag_knob != 0) ? (
+  sens = shift_held ? 800 : 200;
+  newval01 = drag_start_val + (drag_start_y-mouse_y)/sens;
+  newval01 < 0 ? newval01 = 0;
+  newval01 > 1 ? newval01 = 1;
+  drag_knob==1 ? slider(6) = -24 + newval01*48;
+  drag_knob==2 ? slider(1) = 2 + newval01*8;
+  drag_knob==3 ? slider(2) = -40 + newval01*50;
+  drag_knob==4 ? slider(7) = newval01*100;
+  drag_knob==5 ? slider(3) = newval01*10;
+  drag_knob==6 ? slider(4) = newval01*10;
+  drag_knob==1 ? slider_automate(output_db);
+  drag_knob==2 ? slider_automate(ratio_knob);
+  drag_knob==3 ? slider_automate(threshold_db);
+  drag_knob==4 ? slider_automate(mix);
+  drag_knob==5 ? slider_automate(attack_knob);
+  drag_knob==6 ? slider_automate(release_knob);
+  update_engine();
+  drag_knob==4 ? update_mix();
+);
+
+!left_down ? drag_knob = 0;
+prev_left_down = left_down;
+
+// ---- hover ----
+hov_gain    = pt_in_circle(mouse_x,mouse_y,col1,row1,kr_side);
+hov_ratio   = pt_in_circle(mouse_x,mouse_y,col2,row1,kr_side);
+hov_thresh  = pt_in_circle(mouse_x,mouse_y,col3,row1,kr_side);
+hov_mix     = pt_in_circle(mouse_x,mouse_y,col4,row1,kr_side);
+hov_attack  = pt_in_circle(mouse_x,mouse_y,col1,row2,kr_side);
+hov_release = pt_in_circle(mouse_x,mouse_y,col2,row2,kr_side);
+
+// ---- os 6 knobs (estilo TubeGlow), nas posições originais ----
+edit_target==1 ? sprintf(#vgain,"%s_",#edit_str) : sprintf(#vgain,"%.1f dB",output_db);
+draw_knob_block(col1,row1,kr_side,(output_db+24)/48,hov_gain,"GAIN",#vgain,18);
+edit_target==2 ? sprintf(#vrat,"%s_",#edit_str) : sprintf(#vrat,"%.1f:1",ratio_knob);
+draw_knob_block(col2,row1,kr_side,(ratio_knob-2)/8,hov_ratio,"RATIO",#vrat,18);
+edit_target==3 ? sprintf(#vthr,"%s_",#edit_str) : sprintf(#vthr,"%.1f dB",threshold_db);
+draw_knob_block(col3,row1,kr_side,(threshold_db+40)/50,hov_thresh,"THRESHOLD",#vthr,18);
+edit_target==4 ? sprintf(#vmix,"%s_",#edit_str) : sprintf(#vmix,"%.0f%%",mix);
+draw_knob_block(col4,row1,kr_side,mix/100,hov_mix,"MIX",#vmix,18);
+edit_target==5 ? sprintf(#vatt,"%s_",#edit_str) : sprintf(#vatt,"%.1f",attack_knob);
+draw_knob_block(col1,row2,kr_side,attack_knob/10,hov_attack,"ATTACK",#vatt,18);
+edit_target==6 ? sprintf(#vrel,"%s_",#edit_str) : sprintf(#vrel,"%.1f",release_knob);
+draw_knob_block(col2,row2,kr_side,release_knob/10,hov_release,"RELEASE",#vrel,18);
+
+// ---- A/R Select: label acima + botão único (sempre em destaque, cicla no clique) ----
+gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
+gfx_setfont(3, "Arial", 10);
+sprintf(#arlbl, "A/R SELECT");
+gfx_measurestr(#arlbl, arlbl_w, arlbl_h);
+gfx_x = col3 - arlbl_w*0.5; gfx_y = ar_by - 18;
+gfx_drawstr(#arlbl);
+
+set_ar_name(ar_select);
+draw_toggle_button(ar_bx,ar_by,ar_bw,ar_bh, 1, 0.95,0.6,0.16, #artxt, #artxt);
+
+// ---- Bypass: label acima + botão toggle (laranja=processando, apagado=bypassed) ----
+gfx_setfont(3, "Arial", 10);
+gfx_r=0.6; gfx_g=0.6; gfx_b=0.62; gfx_a=1;
+sprintf(#byplbl, "TRUE BYPASS");
+gfx_measurestr(#byplbl, byplbl_w, byplbl_h);
+gfx_x = col5 - byplbl_w*0.5; gfx_y = byp_by - 18;
+gfx_drawstr(#byplbl);
+
+draw_toggle_button(byp_bx,byp_by,byp_bw,byp_bh, !bypass_on, 0.95,0.6,0.16, "ON","OFF");
+
+// ---- VU/GR meter (cascata de 2 polos, ver @sample) ----
+cx = vu_x + vu_w * 0.5; cy = vu_y + vu_h + 10; radius = 100;
+
+gfx_setfont(3, "Arial", 10);
+gfx_r = c_txt_r; gfx_g = c_txt_g; gfx_b = c_txt_b; gfx_a = 1;
+gfx_measurestr("GR (dB)", tw, th);
+gfx_x = cx - tw / 2; gfx_y = vu_y - 16;
+gfx_drawstr("GR (dB)");
+
+gfx_r = 0.04; gfx_g = 0.04; gfx_b = 0.05; gfx_a = 1;
+gfx_rect(vu_x, vu_y, vu_w, vu_h, 1);
+gfx_r = 0.11; gfx_g = 0.11; gfx_b = 0.12;
+gfx_rect(vu_x, vu_y, vu_w, vu_h, 0);
+
+i = 0;
+loop(11,
+  a = 0.6 - (i / 10) * 1.2;
+  is_major = (i % 5 == 0);
+  len = is_major ? 14 : 7;
+  i >= 8 ? (gfx_r = 0.95; gfx_g = 0.50; gfx_b = 0.05; gfx_a = 0.9;)
+         : (gfx_r = 0.4; gfx_g = 0.4; gfx_b = 0.45; gfx_a = 0.6;);
+  px1 = cx + sin(a) * (radius - len); py1 = cy - cos(a) * (radius - len);
+  px2 = cx + sin(a) * radius; py2 = cy - cos(a) * radius;
+  gfx_line(px1, py1, px2, py2);
+
+  is_major ? (
+    tick_db = i * 2.4;
+    sprintf(#tick_lbl, "%d", tick_db);
+    gfx_setfont(4, "Arial", 10, 'b');
+    i >= 8 ? (gfx_r = 0.95; gfx_g = 0.50; gfx_b = 0.05; gfx_a = 1;)
+           : (gfx_r = 0.9; gfx_g = 0.9; gfx_b = 0.92; gfx_a = 1;);
+    gfx_measurestr(#tick_lbl, lbl_tw, lbl_th);
+    lx = cx + sin(a) * (radius - len - 13) - lbl_tw / 2;
+    ly = cy - cos(a) * (radius - len - 13) - lbl_th / 2;
+    gfx_x = lx; gfx_y = ly;
+    gfx_drawstr(#tick_lbl);
+  );
+
+  i += 1;
+);
+
+gr_norm = min(1, gr_meter / 24);
+angle = 0.6 - (gr_norm * 1.2);
+nx = cx + sin(angle) * (radius * 0.95); ny = cy - cos(angle) * (radius * 0.95);
+
+gfx_r = 0.95; gfx_g = 0.50; gfx_b = 0.05; gfx_a = 1;
+gfx_triangle(cx - 1.5, cy - 20, cx + 1.5, cy - 20, nx, ny);
+gfx_r = 0.1; gfx_g = 0.1; gfx_b = 0.12;
+gfx_circle(cx, cy - 20, 6, 1);
+gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.35;
+gfx_circle(cx, cy - 20, 6, 0);
+
+);
+
+@slider
+
+// Mapeamento corrigido: attack_release_mode recebe o A/R Select (0/1/2),
+// attack e release recebem os knobs 0..10 normalizados pra 0..1.
+update_engine();
+
+bypass_on = bypass >= 0.5;
+update_mix();
+
+// recalcula o coeficiente do VU meter caso o sample rate tenha mudado
+vu_k = exp(-1.0 / (max(1, srate) * vu_tau));
+
+@block
+
+// Reporta a redução de ganho pro medidor NATIVO da faixa no REAPER
+// (aquele indicador que "puxa" do topo do medidor de volume, sem
+// precisar de UI embutida nenhuma). REAPER espera isso em dB, e lido
+// uma vez por bloco - por isso o pico é acumulado em @sample e só
+// convertido/resetado aqui.
+ext_gr_meter = K_TO_DB(hold_max_gr);
+hold_max_gr = 1.0;
+
+@sample
+
+bypass_on ? (
+  gr_lin = 1;
+) : (
+  dry_l = spl0;
+  dry_r = spl1;
+
+  effect.CLCompressor_processSampleStereo(spl0, spl1);
+
+  wet_l = effect.y1;
+  wet_r = effect.y2;
+
+  spl0 = dry_l * dry + wet_l * wet;
+  spl1 = dry_r * dry + wet_r * wet;
+
+  gr_lin = effect.gr;
+);
+
+hold_max_gr = min(hold_max_gr, gr_lin);
+
+gr_db = max(0, -20 * log10(max(0.0001, gr_lin)));
+
+// VU meter: 2 polos em cascata, mesmo tau -> resposta em S com inércia,
+// bem mais próxima de uma agulha mecânica real do que exponencial de 1 polo.
+gr_meter_s1 += (gr_db - gr_meter_s1) * (1.0 - vu_k);
+gr_meter_s2 += (gr_meter_s1 - gr_meter_s2) * (1.0 - vu_k);
+gr_meter = gr_meter_s2;
+
+@gfx 860 330
+
+// Detecta se estamos numa janela "de verdade" (plugin aberto normal,
+// 860x330) ou numa área embutida bem menor (medidor no TCP/MCP do
+// REAPER) - nesse segundo caso, cabe só o medidor de GR, não a UI toda.
+is_embedded = gfx_w < 400 || gfx_h < 200;
+is_embedded ? draw_compact_ui() : draw_full_ui();
+
