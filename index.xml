@@ -7,7 +7,7 @@
 saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></description>
         <link rel="website">https://sombinario.com</link>
       </metadata>
-      <version name="1.2" author="Jorge Araujo (SomBinário)" time="2026-08-17T03:50:00Z">
+      <version name="1.2.1" author="Jorge Araujo (SomBinário)" time="2026-08-27T05:26:34Z">
         <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_VCA_Punch.jsfx</source>
       </version>
     </reapack>
