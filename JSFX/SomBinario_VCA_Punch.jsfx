@@ -1,11 +1,12 @@
 // @description SomBinario VCA Punch
 // @author Jorge Araujo (SomBinario)
-// @version 1.2.0
+// @version 1.2.1
 // @about
 //   Um Bus Compressor VCA hibrido com circuito Thrust integrado, 
 //   focado em 'glue', saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).
 //   v1.2.0: coeficientes do filtro Thrust e do medidor de GR agora sao
 //   independentes de sample rate (corrigido por Claude).
+//   v1.2.1: Adicionado reset aos valores padrao via Duplo Clique e Alt+Clique.
 // @links
 //   Website https://sombinario.com.BR
 // ------------------------------------------------------------------
@@ -32,6 +33,10 @@ active_knob = -1; last_mouse_cap = 0;
 start_mouse_y = 0; start_val_0 = 0; start_val_2 = 0; start_val_3 = 0; 
 start_val_5 = 0; start_val_7 = 0; start_val_8 = 0; start_val_9 = 0; 
 start_val_10 = 0; start_val_11 = 0;
+
+// Variaveis para detectar o duplo clique
+last_click_time = 0;
+last_clicked_knob = -1;
 
 @block
 threshold_db = slider1;
@@ -300,6 +305,8 @@ gfx_getchar();
 
   mouse_down && last_mouse_cap == 0 ? (
     active_knob = -1; check_i = 0;
+    current_time = time_precise();
+
     loop(12,
       check_x = check_i % 6 == 0 ? x1 :
                 check_i % 6 == 1 ? x2 :
@@ -309,16 +316,44 @@ gfx_getchar();
       check_y = check_i < 6 ? y1 : y2;
 
       abs(mouse_x - check_x) < 32 && abs(mouse_y - check_y) < 32 ? (
-        check_i == 1 ? ( slider2 = slider2 >= 4 ? 0 : slider2 + 1; slider_automate(slider2); ) :
-        check_i == 4 ? ( slider5 = slider5 == 0 ? 1 : 0; slider_automate(slider5); ) :
-        check_i == 6 ? ( slider7 = slider7 >= 2 ? 0 : slider7 + 1; slider_automate(slider7); ) : (
-          active_knob = check_i;
-          start_mouse_y = mouse_y;
-          start_val_0 = slider1; start_val_2 = slider3;
-          start_val_3 = slider4; start_val_5 = slider6;
-          start_val_7 = slider8; start_val_8 = slider9; 
-          start_val_9 = slider10; start_val_10 = slider11;
-          start_val_11 = slider12;
+        
+        is_alt_click = (mouse_cap & 16);
+        is_double_click = (current_time - last_click_time < 0.3) && (last_clicked_knob == check_i);
+
+        (is_alt_click || is_double_click) ? (
+          // Reset para os valores padrao nativos do Slider
+          check_i == 0 ? ( slider1 = -18; slider_automate(slider1); ) :
+          check_i == 1 ? ( slider2 = 1; slider_automate(slider2); ) :
+          check_i == 2 ? ( slider3 = 10; slider_automate(slider3); ) :
+          check_i == 3 ? ( slider4 = 0.30; slider_automate(slider4); ) :
+          check_i == 4 ? ( slider5 = 1; slider_automate(slider5); ) :
+          check_i == 5 ? ( slider6 = 50; slider_automate(slider6); ) :
+          check_i == 6 ? ( slider7 = 1; slider_automate(slider7); ) :
+          check_i == 7 ? ( slider8 = 55; slider_automate(slider8); ) :
+          check_i == 8 ? ( slider9 = 0; slider_automate(slider9); ) :
+          check_i == 9 ? ( slider10 = 100; slider_automate(slider10); ) :
+          check_i == 10 ? ( slider11 = 15; slider_automate(slider11); ) :
+          check_i == 11 ? ( slider12 = 0; slider_automate(slider12); );
+          
+          active_knob = -1; // Impede que o mouse inicie um drag logo após o reset
+          last_click_time = 0; // Evita falsos gatilhos de duplo clique em sequência
+        ) : (
+          // Comportamento normal de clique / arraste
+          check_i == 1 ? ( slider2 = slider2 >= 4 ? 0 : slider2 + 1; slider_automate(slider2); ) :
+          check_i == 4 ? ( slider5 = slider5 == 0 ? 1 : 0; slider_automate(slider5); ) :
+          check_i == 6 ? ( slider7 = slider7 >= 2 ? 0 : slider7 + 1; slider_automate(slider7); ) : (
+            active_knob = check_i;
+            start_mouse_y = mouse_y;
+            start_val_0 = slider1; start_val_2 = slider3;
+            start_val_3 = slider4; start_val_5 = slider6;
+            start_val_7 = slider8; start_val_8 = slider9; 
+            start_val_9 = slider10; start_val_10 = slider11;
+            start_val_11 = slider12;
+          );
+          
+          // Registra info para a proxima iteracao de clique (caso vire um duplo clique)
+          last_click_time = current_time;
+          last_clicked_knob = check_i;
         );
       );
       check_i += 1;
