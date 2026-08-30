@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <index version="1" name="SomBinario Plugins">
   <category name="JSFX">
-    <reapack name="SomBinario_VCA_Punch.jsfx" type="effect" desc="SomBinario VCA Punch">
+    <reapack name="SomBinario_VCA_Punch.jsfx" type="effect" desc="SomBinário VCA Punch">
       <metadata>
         <description><![CDATA[Um Bus Compressor VCA hibrido focado em 'glue', 
 saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></description>
