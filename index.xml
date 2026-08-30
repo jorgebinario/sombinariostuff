@@ -33,14 +33,6 @@ saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></descriptio
         <source file="3.wav">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/3.wav</source>
       </version>
     </reapack>
-    <reapack name="SomBinario_CL1B.jsfx" type="effect" desc="SomBinario CL1B">
-      <metadata>
-        <description><![CDATA[O SomBinario CL1B é uma simulação de compressor óptico valvulado, baseada no Tube-Tech CL 1B, com motor por tabelas de resposta medidas do hardware real. Controles de Threshold, Ratio, Attack, Release, A/R Select (Fixed / Fixed+Manual / Manual), Output Gain, Mix e Bypass.]]></description>
-        <link rel="website">https://sombinario.com</link>
-      </metadata>
-      <version name="1.0" author="Jorge Araujo (SomBinário)" time="2026-08-26T05:00:00Z">
-        <source main="main">https://raw.githubusercontent.com/jorgebinario/sombinariostuff/main/JSFX/SomBinario_CL1B.jsfx</source>
-      </version>
-    </reapack>
+   
   </category>
 </index>
