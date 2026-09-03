@@ -4,7 +4,7 @@
     <reapack name="SomBinario_VCA_Punch.jsfx" type="effect" desc="SomBinário VCA Punch">
       <metadata>
         <description><![CDATA[Um Bus Compressor VCA hibrido focado em 'glue', 
-saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).]]></description>
+saturacao compensada (THD) e controle de Crest Factor e dual release. (Peak/RMS).]]></description>
         <link rel="website">https://sombinario.com</link>
       </metadata>
       <version name="1.3.1" author="Jorge Araujo (SomBinário)" time="2026-08-27T05:26:34Z">
