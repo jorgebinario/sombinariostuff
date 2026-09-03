@@ -1,17 +1,22 @@
 // @description SomBinario VCA Punch
 // @author Jorge Araujo (SomBinario)
-// @version 1.2.1
+// @version 1.3.1
 // @about
 //   Um Bus Compressor VCA hibrido com circuito Thrust integrado, 
 //   focado em 'glue', saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).
 //   v1.2.0: coeficientes do filtro Thrust e do medidor de GR agora sao
 //   independentes de sample rate (corrigido por Claude).
 //   v1.2.1: Adicionado reset aos valores padrao via Duplo Clique e Alt+Clique.
+//   v1.3.0: Estagio THD substituido por uma curva medida de verdade no
+//   transformador de saida de um compressor analogico.
+//   Curva extraida de uma varredura de nivel real
+//   em 1kHz, normalizada para ganho unitario em sinais baixos (Claude).
+//   v1.3.1: Escala numerica (0/6/12/18/24 dB) no medidor de Gain Reduction.
 // @links
 //   Website https://sombinario.com.BR
 // ------------------------------------------------------------------
 
-desc:SomBinario VCA Punch v1.2 (SomBinario)
+desc:SomBinario VCA Punch v1.3.1 (SomBinario)
 options: gfx_hz=60
 
 slider1:-18<-50,15,0.1>-Threshold (dB)
@@ -38,6 +43,78 @@ start_val_10 = 0; start_val_11 = 0;
 last_click_time = 0;
 last_clicked_knob = -1;
 
+// Estagio Greenbox: envelope do limitador de pico (memoria/tempo real)
+gb_env = 0;
+gb_env_l = 0;
+gb_env_r = 0;
+gb_sc_low_l = 0;
+gb_sc_low_r = 0;
+
+// ---------------------------------------------------------------------
+// Trafo transfer curve (measured)
+// Fonte: varredura de nivel real em 1kHz atraves do estagio de saida +
+// transformador de um compressor analogico.Tabela de 256 pontos, normalizada pra ganho
+// unitario em sinais baixos (a saturacao real do aparelho comeca a atuar
+// por volta de -13dBFS de entrada e chega a ~-10.6dB de compressao no topo
+// da faixa medida). Alem do ponto mais alto medido (~0.84 linear), a curva
+// e extrapolada continuando a mesma tendencia de compressao suave.
+function gb_shaper(x) local(ax, findex, t0, t1, k, y)
+(
+  ax = min(abs(x), 1.0);
+  findex = ax * 255.0;
+  t0 = floor(findex);
+  t1 = min(t0 + 1, 255);
+  k = findex - t0;
+  y = gb_tbl[t1]*k + gb_tbl[t0]*(1.0-k);
+  (x < 0) ? -y : y;
+);
+
+// Fast peak-catching soft clipper using the measured curve as the knee shape.
+// Has real attack/release (memory) instead of reshaping each sample in
+// isolation - a static waveshaper can't tell a 5ms transient from a sustained
+// tone, but a real analog soft-clip circuit reacts and recovers over time.
+// Modulating gain smoothly (instead of redrawing the waveform sample-by-
+// sample) also avoids generating extra high-frequency harmonics that made
+// low end sound gritty with the old memoryless approach.
+function gb_limiter_gain(peak_in, drive) local(driven, shaped)
+(
+  driven = peak_in * drive;
+  shaped = gb_shaper(driven) / drive;
+  (peak_in > 0.0001) ? min(1.0, shaped / peak_in) : 1.0;
+);
+
+  gb_tbl[0] = -0.000012846; gb_tbl[1] = 0.003919865; gb_tbl[2] = 0.007843877; gb_tbl[3] = 0.011762954; gb_tbl[4] = 0.015687751; gb_tbl[5] = 0.019609760; gb_tbl[6] = 0.023525846; gb_tbl[7] = 0.027455149;
+  gb_tbl[8] = 0.031374649; gb_tbl[9] = 0.035292394; gb_tbl[10] = 0.039209965; gb_tbl[11] = 0.043136864; gb_tbl[12] = 0.047052373; gb_tbl[13] = 0.050969267; gb_tbl[14] = 0.054895254; gb_tbl[15] = 0.058830104;
+  gb_tbl[16] = 0.062746057; gb_tbl[17] = 0.066656515; gb_tbl[18] = 0.070581151; gb_tbl[19] = 0.074508340; gb_tbl[20] = 0.078426811; gb_tbl[21] = 0.082342050; gb_tbl[22] = 0.086260825; gb_tbl[23] = 0.090182109;
+  gb_tbl[24] = 0.094105398; gb_tbl[25] = 0.098032084; gb_tbl[26] = 0.101960884; gb_tbl[27] = 0.105886802; gb_tbl[28] = 0.109806590; gb_tbl[29] = 0.113723113; gb_tbl[30] = 0.117640511; gb_tbl[31] = 0.121562078;
+  gb_tbl[32] = 0.125486461; gb_tbl[33] = 0.129411482; gb_tbl[34] = 0.133335027; gb_tbl[35] = 0.137255893; gb_tbl[36] = 0.141175269; gb_tbl[37] = 0.145094625; gb_tbl[38] = 0.149015431; gb_tbl[39] = 0.152939027;
+  gb_tbl[40] = 0.156864849; gb_tbl[41] = 0.160791202; gb_tbl[42] = 0.164716382; gb_tbl[43] = 0.168638830; gb_tbl[44] = 0.172561723; gb_tbl[45] = 0.176484788; gb_tbl[46] = 0.180405007; gb_tbl[47] = 0.184319363;
+  gb_tbl[48] = 0.188224838; gb_tbl[49] = 0.192198347; gb_tbl[50] = 0.196264868; gb_tbl[51] = 0.200323861; gb_tbl[52] = 0.204274674; gb_tbl[53] = 0.208016656; gb_tbl[54] = 0.211450474; gb_tbl[55] = 0.214638544;
+  gb_tbl[56] = 0.217673739; gb_tbl[57] = 0.220570460; gb_tbl[58] = 0.223343111; gb_tbl[59] = 0.226006095; gb_tbl[60] = 0.228573814; gb_tbl[61] = 0.231056090; gb_tbl[62] = 0.233442056; gb_tbl[63] = 0.235740453;
+  gb_tbl[64] = 0.237963545; gb_tbl[65] = 0.240123597; gb_tbl[66] = 0.242232876; gb_tbl[67] = 0.244303646; gb_tbl[68] = 0.246352654; gb_tbl[69] = 0.248601362; gb_tbl[70] = 0.251058073; gb_tbl[71] = 0.253570793;
+  gb_tbl[72] = 0.255987524; gb_tbl[73] = 0.258156270; gb_tbl[74] = 0.259925035; gb_tbl[75] = 0.261141821; gb_tbl[76] = 0.261654633; gb_tbl[77] = 0.261652558; gb_tbl[78] = 0.261620789; gb_tbl[79] = 0.261567990;
+  gb_tbl[80] = 0.261495988; gb_tbl[81] = 0.261406611; gb_tbl[82] = 0.261301686; gb_tbl[83] = 0.261183041; gb_tbl[84] = 0.261052503; gb_tbl[85] = 0.260911900; gb_tbl[86] = 0.260727720; gb_tbl[87] = 0.260364683;
+  gb_tbl[88] = 0.259846040; gb_tbl[89] = 0.259214171; gb_tbl[90] = 0.258511455; gb_tbl[91] = 0.257780273; gb_tbl[92] = 0.257063005; gb_tbl[93] = 0.256402031; gb_tbl[94] = 0.255839731; gb_tbl[95] = 0.255418486;
+  gb_tbl[96] = 0.255178065; gb_tbl[97] = 0.255023569; gb_tbl[98] = 0.254887493; gb_tbl[99] = 0.254767489; gb_tbl[100] = 0.254661206; gb_tbl[101] = 0.254566294; gb_tbl[102] = 0.254480403; gb_tbl[103] = 0.254401183;
+  gb_tbl[104] = 0.254326284; gb_tbl[105] = 0.254253356; gb_tbl[106] = 0.254180049; gb_tbl[107] = 0.254104014; gb_tbl[108] = 0.254024134; gb_tbl[109] = 0.253947139; gb_tbl[110] = 0.253873898; gb_tbl[111] = 0.253803755;
+  gb_tbl[112] = 0.253736057; gb_tbl[113] = 0.253670149; gb_tbl[114] = 0.253605377; gb_tbl[115] = 0.253541087; gb_tbl[116] = 0.253476623; gb_tbl[117] = 0.253411331; gb_tbl[118] = 0.253344558; gb_tbl[119] = 0.253275647;
+  gb_tbl[120] = 0.253203946; gb_tbl[121] = 0.253128853; gb_tbl[122] = 0.253050672; gb_tbl[123] = 0.252969920; gb_tbl[124] = 0.252886999; gb_tbl[125] = 0.252802309; gb_tbl[126] = 0.252716255; gb_tbl[127] = 0.252629238;
+  gb_tbl[128] = 0.252541660; gb_tbl[129] = 0.252453923; gb_tbl[130] = 0.252366429; gb_tbl[131] = 0.252279581; gb_tbl[132] = 0.252193781; gb_tbl[133] = 0.252109430; gb_tbl[134] = 0.252026932; gb_tbl[135] = 0.251946688;
+  gb_tbl[136] = 0.251868445; gb_tbl[137] = 0.251790057; gb_tbl[138] = 0.251711506; gb_tbl[139] = 0.251633005; gb_tbl[140] = 0.251554768; gb_tbl[141] = 0.251477007; gb_tbl[142] = 0.251399938; gb_tbl[143] = 0.251323772;
+  gb_tbl[144] = 0.251248724; gb_tbl[145] = 0.251175008; gb_tbl[146] = 0.251102836; gb_tbl[147] = 0.251032423; gb_tbl[148] = 0.250963982; gb_tbl[149] = 0.250897727; gb_tbl[150] = 0.250833870; gb_tbl[151] = 0.250772627;
+  gb_tbl[152] = 0.250714191; gb_tbl[153] = 0.250656888; gb_tbl[154] = 0.250599653; gb_tbl[155] = 0.250542692; gb_tbl[156] = 0.250486209; gb_tbl[157] = 0.250430409; gb_tbl[158] = 0.250375496; gb_tbl[159] = 0.250321674;
+  gb_tbl[160] = 0.250269147; gb_tbl[161] = 0.250218122; gb_tbl[162] = 0.250168801; gb_tbl[163] = 0.250121389; gb_tbl[164] = 0.250076091; gb_tbl[165] = 0.250033111; gb_tbl[166] = 0.249992654; gb_tbl[167] = 0.249954924;
+  gb_tbl[168] = 0.249920125; gb_tbl[169] = 0.249888462; gb_tbl[170] = 0.249860140; gb_tbl[171] = 0.249835085; gb_tbl[172] = 0.249812084; gb_tbl[173] = 0.249790818; gb_tbl[174] = 0.249771109; gb_tbl[175] = 0.249752780;
+  gb_tbl[176] = 0.249735656; gb_tbl[177] = 0.249719558; gb_tbl[178] = 0.249704312; gb_tbl[179] = 0.249689740; gb_tbl[180] = 0.249675665; gb_tbl[181] = 0.249661910; gb_tbl[182] = 0.249648300; gb_tbl[183] = 0.249634657;
+  gb_tbl[184] = 0.249620805; gb_tbl[185] = 0.249606566; gb_tbl[186] = 0.249591765; gb_tbl[187] = 0.249576225; gb_tbl[188] = 0.249559768; gb_tbl[189] = 0.249542219; gb_tbl[190] = 0.249523400; gb_tbl[191] = 0.249503136;
+  gb_tbl[192] = 0.249481510; gb_tbl[193] = 0.249459032; gb_tbl[194] = 0.249435738; gb_tbl[195] = 0.249411645; gb_tbl[196] = 0.249386771; gb_tbl[197] = 0.249361131; gb_tbl[198] = 0.249334743; gb_tbl[199] = 0.249307623;
+  gb_tbl[200] = 0.249279789; gb_tbl[201] = 0.249251257; gb_tbl[202] = 0.249222043; gb_tbl[203] = 0.249192165; gb_tbl[204] = 0.249161640; gb_tbl[205] = 0.249130483; gb_tbl[206] = 0.249098713; gb_tbl[207] = 0.249066346;
+  gb_tbl[208] = 0.249033398; gb_tbl[209] = 0.248999887; gb_tbl[210] = 0.248965829; gb_tbl[211] = 0.248931241; gb_tbl[212] = 0.248896139; gb_tbl[213] = 0.248860542; gb_tbl[214] = 0.248824465; gb_tbl[215] = 0.248789224;
+  gb_tbl[216] = 0.248754893; gb_tbl[217] = 0.248721448; gb_tbl[218] = 0.248688866; gb_tbl[219] = 0.248657125; gb_tbl[220] = 0.248626202; gb_tbl[221] = 0.248596078; gb_tbl[222] = 0.248566731; gb_tbl[223] = 0.248538141;
+  gb_tbl[224] = 0.248510290; gb_tbl[225] = 0.248483156; gb_tbl[226] = 0.248456723; gb_tbl[227] = 0.248430973; gb_tbl[228] = 0.248405886; gb_tbl[229] = 0.248381447; gb_tbl[230] = 0.248357639; gb_tbl[231] = 0.248334445;
+  gb_tbl[232] = 0.248311849; gb_tbl[233] = 0.248289837; gb_tbl[234] = 0.248268393; gb_tbl[235] = 0.248247502; gb_tbl[236] = 0.248227150; gb_tbl[237] = 0.248207323; gb_tbl[238] = 0.248188008; gb_tbl[239] = 0.248169191;
+  gb_tbl[240] = 0.248150860; gb_tbl[241] = 0.248133002; gb_tbl[242] = 0.248115605; gb_tbl[243] = 0.248098656; gb_tbl[244] = 0.248082145; gb_tbl[245] = 0.248066060; gb_tbl[246] = 0.248050391; gb_tbl[247] = 0.248035125;
+  gb_tbl[248] = 0.248020254; gb_tbl[249] = 0.248005766; gb_tbl[250] = 0.247991652; gb_tbl[251] = 0.247977902; gb_tbl[252] = 0.247964507; gb_tbl[253] = 0.247951458; gb_tbl[254] = 0.247938746; gb_tbl[255] = 0.247926361;
 @block
 threshold_db = slider1;
 ratio_mode = floor(slider2 + 0.5);
@@ -65,6 +142,12 @@ thrust_lp_coeff = 1 - exp(-1 / max(1, 0.0056 * srate));
 // Ballistics do medidor de GR (subida rapida, descida suave)
 gr_meter_rise = 1 - exp(-1 / max(1, 0.003 * srate));
 gr_meter_fall = 1 - exp(-1 / max(1, 0.05 * srate));
+
+// Greenbox peak-catching soft clip: fast attack (catches transients),
+// ~20ms release (lets it breathe back, avoids pumping/distortion from the
+// gain envelope itself)
+gb_attack_coeff = exp(-1 / max(1, 0.0002 * srate));
+gb_release_coeff = exp(-1 / max(1, 0.020 * srate));
 
 thrust_linear = thrust_amount * 0.01;
 makeup_linear = pow(10, makeup_db / 20);
@@ -138,9 +221,61 @@ wet_l = input_l * gain_smoothed * makeup_linear;
 wet_r = input_r * gain_smoothed * makeup_linear;
 
 thd_linear > 0 ? (
-  drive = 1 + thd_linear * 6;
-  sat_l = (wet_l * drive) / (1 + abs(wet_l * drive)) / drive;
-  sat_r = (wet_r * drive) / (1 + abs(wet_r * drive)) / drive;
+  drive = 1 + thd_linear * 3;
+
+  // Measured L/R channel imbalance on the real unit: R runs consistently
+  // ~0.57dB hotter than L (normal manufacturing tolerance between two
+  // separate transformers/amp stages) - applying it symmetrically so overall
+  // level and mono compatibility stay reasonable.
+  gb_l_in = wet_l * 0.9678;   // -0.284dB
+  gb_r_in = wet_r * 1.0333;   // +0.284dB
+
+  // independent per-channel envelope/gain - a real stereo signal path has a
+  // separate transformer per channel, each reacting only to its own content.
+  // Linking L/R (sharing one envelope) was collapsing the natural L/R
+  // differences that give a mix its width/dimension ("2D" complaint).
+  //
+  // The DETECTOR (what decides how much to saturate) uses the same low/high
+  // split as the main compressor's Thrust control, so higher Thrust makes
+  // the Greenbox stage react less to sustained bass and more to transients -
+  // keeping low end cleaner/bigger, same idea as Thrust already does for the
+  // main compressor's sidechain. The actual audio being processed is still
+  // the full-band signal - only what TRIGGERS saturation is bass-reduced.
+  gb_sc_low_l += (abs(gb_l_in) - gb_sc_low_l) * thrust_lp_coeff;
+  gb_sc_high_l = abs(gb_l_in) - gb_sc_low_l;
+  gb_detect_l = max(0, gb_sc_low_l * (1 - thrust_linear*0.75) + gb_sc_high_l * (1 + thrust_linear*1.5));
+
+  gb_sc_low_r += (abs(gb_r_in) - gb_sc_low_r) * thrust_lp_coeff;
+  gb_sc_high_r = abs(gb_r_in) - gb_sc_low_r;
+  gb_detect_r = max(0, gb_sc_low_r * (1 - thrust_linear*0.75) + gb_sc_high_r * (1 + thrust_linear*1.5));
+
+  gb_coeff_l = gb_detect_l > gb_env_l ? gb_attack_coeff : gb_release_coeff;
+  gb_env_l = gb_detect_l + gb_coeff_l * (gb_env_l - gb_detect_l);
+  gb_coeff_r = gb_detect_r > gb_env_r ? gb_attack_coeff : gb_release_coeff;
+  gb_env_r = gb_detect_r + gb_coeff_r * (gb_env_r - gb_detect_r);
+
+  gb_gain_l = gb_limiter_gain(gb_env_l, drive);
+  gb_gain_r = gb_limiter_gain(gb_env_r, drive);
+
+  // A pure linear gain turn-down removes energy with nothing to compensate.
+  // Real saturating hardware trades some of that lost fundamental for
+  // harmonic energy, which is a big part of why it still sounds loud/big
+  // even while genuinely reducing gain. Blend toward the fully-waveshaped
+  // (harmonic-rich) version in proportion to how hard the limiter is
+  // working right now - quiet/unaffected material stays perfectly clean,
+  // only material that's actually being caught gets the harmonic "size"
+  // added back.
+  gb_grit_l = 1.0 - gb_gain_l;
+  gb_grit_r = 1.0 - gb_gain_r;
+
+  lin_l = gb_l_in * gb_gain_l;
+  lin_r = gb_r_in * gb_gain_r;
+  shp_l = gb_shaper(gb_l_in * drive) / drive;
+  shp_r = gb_shaper(gb_r_in * drive) / drive;
+
+  sat_l = lin_l * (1.0 - gb_grit_l) + shp_l * gb_grit_l;
+  sat_r = lin_r * (1.0 - gb_grit_r) + shp_r * gb_grit_r;
+
   wet_l = wet_l * (1 - thd_linear) + sat_l * thd_linear;
   wet_r = wet_r * (1 - thd_linear) + sat_r * thd_linear;
 );
@@ -196,7 +331,7 @@ gfx_getchar();
   gfx_rect(0, 0, gfx_w, gfx_h, 1);
 
   gfx_r = 0.13; gfx_g = 0.15; gfx_b = 0.17;
-  gfx_rect(16, 12, gfx_w - 32, 40, 1);
+  gfx_rect(16, 12, gfx_w - 32, 46, 1);
 
   gfx_r = 0.90; gfx_g = 0.92; gfx_b = 0.95;
   gfx_x = 26; gfx_y = 18;
@@ -214,6 +349,27 @@ gfx_getchar();
 
   gfx_r = 0.95; gfx_g = 0.32; gfx_b = 0.10;
   gfx_rect(meter_x, meter_y, meter_w * meter_norm, meter_h, 1);
+
+  // --- Escala numerica do medidor de GR (0 a 24 dB) ---
+  tick_i = 0;
+  loop(5,
+    tick_db = tick_i * 6;
+    tick_x = meter_x + meter_w * (tick_db / 24);
+
+    gfx_a = 1;
+    gfx_r = 0.35; gfx_g = 0.38; gfx_b = 0.42;
+    gfx_line(tick_x, meter_y + meter_h, tick_x, meter_y + meter_h + 3);
+
+    sprintf(#tick_text, "%d", tick_db);
+    gfx_measurestr(#tick_text, tick_w, tick_h);
+    tick_tx = max(meter_x, min(meter_x + meter_w - tick_w, tick_x - tick_w * 0.5));
+
+    gfx_r = 0.50; gfx_g = 0.53; gfx_b = 0.58;
+    gfx_x = tick_tx; gfx_y = meter_y + meter_h + 4;
+    gfx_drawstr(#tick_text);
+
+    tick_i += 1;
+  );
 
   gfx_r = 0.75; gfx_g = 0.78; gfx_b = 0.82;
   gfx_x = meter_x; gfx_y = meter_y - 12;
