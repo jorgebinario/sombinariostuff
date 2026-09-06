@@ -3,47 +3,34 @@ PolyForm Noncommercial License 1.0.0
 Required Notice: Copyright (c) 2026 Jorge Araujo / SomBinário
 
 ## Acceptance
-In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
+
+In order to get any license under these terms, you must agree
+to them as both strict obligations and conditions to all
+your licenses.
 
 ## Copyright License
-The licensor grants you a copyright license for the software to do everything you might do with the software that would otherwise infringe the licensor's copyright in it for any permitted purpose. However, you may only distribute the software according to Distribution License and make changes or new works based on the software according to Changes and New Works License.
+
+The licensor grants you a copyright license for the
+software to do everything you might do with the software
+that would otherwise infringe the licensor's copyright
+in it for any permitted purpose. However, you may
+only distribute the software according to Distribution
+License and make changes or new works based on the
+software according to Changes and New Works License.
 
 ## Distribution License
-The licensor grants you an additional copyright license to distribute copies of the software. Your license to distribute covers distributing the software with changes and new works permitted by Changes and New Works License.
 
-## Notices
-You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software. For example:
+The licensor grants you an additional copyright license
+to distribute copies of the software. Your license
+to distribute covers distributing the software with
+Your TXT file is ready
+[file-tag: code-generated-file-5f9eaa99-d68f-45d8-a3d4-f47a2a443be8]
 
-> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
+Justo! Aqui está o arquivo de texto pronto com a licença configurada para você copiar e colar sem se preocupar. 
 
-## Changes and New Works License
-The licensor grants you an additional copyright license to make changes and new works based on the software for any permitted purpose.
+Configurei a linha inicial exatamente com os seus dados: `Required Notice: Copyright (c) 2026 Jorge Araujo / SomBinário`. 
 
-## Patent License
-The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software.
+**Uma observação sobre o Yoyodyne que ficou no texto:** 
+Se você reparar na seção "Notices" do arquivo gerado, o `Yoyodyne, Inc.` ainda aparece lá embaixo. Isso ocorre porque aquela seção da licença é um **guia de instrução imutável** que ensina os desenvolvedores a aplicarem o aviso no código, e aquele Yoyodyne funciona apenas como a "foto de demonstração" dentro do manual da licença. Você não precisa (e do ponto de vista jurídico, nem deve) alterar o bloco de texto interno da licença. A única parte que você preenche com a sua própria marca e nome é no topo do documento, exatamente como deixei configurado na primeira linha do arquivo `LICENSE.txt`.
 
-## Noncommercial Purposes
-Any noncommercial purpose is a permitted purpose.
-
-## Personal Uses
-Personal use for research, experiment, and testing for the benefit of public knowledge, personal study, private entertainment, hobby projects, amateur pursuits, or religious observance, without any anticipated commercial application, is use for a permitted purpose.
-
-## Noncommercial Organizations
-Use by any charitable organization, educational institution, public research organization, public safety or health organization, environmental protection organization, or government institution is use for a permitted purpose regardless of the source of funding or obligations resulting from the funding.
-
-## Fair Use
-You may have "fair use" rights for the software under the law. These terms do not limit them.
-
-## No Other Rights
-These terms do not allow you to sublicense or transfer any of your licenses to anyone else, or prevent the licensor from granting licenses to anyone else. These terms do not imply any other licenses.
-
-## Patent Defense
-If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the**1. PolyForm Noncommercial 1.0.0 (Recomendada para código)**
-* **Texto completo:** Acesse o [texto oficial no site da PolyForm](https://polyformproject.org/licenses/noncommercial/1.0.0.txt), copie todo o conteúdo e cole no seu arquivo `LICENSE` em branco no GitHub.
-* **Aviso obrigatório (Required Notice):** A licença exige uma linha de identificação específica. No topo do arquivo `LICENSE`, e preferencialmente no cabeçalho do código de cada plugin, adicione:
-  > `Required Notice: Copyright 2026 Jorge Araujo`
-
-**2. Creative Commons Atribuição-NãoComercial 4.0 (CC BY-NC 4.0)**
-* **Texto completo:** Acesse o [texto oficial em formato TXT da Creative Commons](https://creativecommons.org/licenses/by-nc/4.0/legalcode.txt), copie o texto e cole no seu arquivo `LICENSE`.
-* **Aviso para o README:** Como a linguagem jurídica da Creative Commons é muito longa, adicione o seguinte aviso no arquivo `README.md` do repositório para deixar a proibição clara aos visitantes imediatamente:
-  > `Este projeto está licenciado sob a licença Creative Commons Atribuição-NãoComercial 4.0 Internacional (CC BY-NC 4.0). O uso comercial, venda ou distribuição em serviços pagos são estritamente proibidos.`
+Basta abrir o arquivo acima, copiar todo o conteúdo e colar no seu GitHub.
