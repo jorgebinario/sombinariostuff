@@ -1,102 +1,21 @@
-# SomBinário JSFX License, Version 1.0
+MIT License
 
-Copyright (c) 2026 Jorge Araujo / SomBinário
-https://sombinario.com.br
+Copyright (c) 2026 Jorge Araujo / SomBinário (https://sombinario.com.br)
 
-## Summary (not legally binding)
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Use these plugins for anything you want, including paid work. Share them
-freely. Don't sell them, and don't put them inside something you sell.
-
-## 1. Definitions
-
-"Software" means the JSFX plugin source files, presets, graphics, and
-documentation distributed under this license.
-
-"Licensor" means Jorge Araujo / SomBinário.
-
-"You" means any individual or organization exercising the permissions
-granted by this license.
-
-## 2. Grant of Use
-
-The Licensor grants You a worldwide, royalty-free, non-exclusive license
-to install and use the Software for any purpose, personal or commercial.
-
-This expressly includes using the Software to record, produce, mix,
-master, perform, broadcast, or stream audio, including work You are paid
-for and audio works You sell. Audio produced with the Software is Yours
-alone. The Licensor claims no rights in it and requires no royalty,
-credit, or notification, although credit is always appreciated.
-
-## 3. Grant of Distribution
-
-You may copy and redistribute the Software, provided that:
-
-  a. You distribute it free of charge;
-  b. You include this license and all copyright notices unchanged; and
-  c. You do not present the Software as your own work.
-
-## 4. Grant of Modification
-
-You may modify the Software for Your own use. You may distribute modified
-versions publicly, provided that:
-
-  a. All conditions of Section 3 are met;
-  b. You clearly state that the version is modified and identify the
-     changes;
-  c. The modified version is distributed under this same license; and
-  d. You do not use the name "SomBinário", "Jorge Araujo", or any
-     confusingly similar name in the title or branding of the modified
-     version, or in any way that suggests the Licensor endorses it.
-
-## 5. Restrictions
-
-Except with prior written permission from the Licensor, You may not:
-
-  a. Sell, rent, lease, sublicense, or otherwise charge any fee for the
-     Software itself;
-  b. Include the Software, in whole or in part, in any commercial product,
-     paid plugin bundle, paid preset pack, paid course, subscription
-     service, or content placed behind a paywall;
-  c. Distribute the Software through any platform or service that charges
-     users for access to it;
-  d. Remove, obscure, or alter any copyright, license, or attribution
-     notice contained in the Software; or
-  e. Use the Licensor's names, logos, or trademarks to promote any
-     product or derivative work.
-
-For clarity, none of the above restricts the use permitted by Section 2.
-Selling audio you created with the Software is not selling the Software.
-
-## 6. Commercial Licensing
-
-Uses not permitted by this license may be available under separate terms.
-Contact the Licensor at https://sombinario.com.br to request a commercial
-license.
-
-## 7. No Warranty
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
-
-## 8. Limitation of Liability
-
-TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSOR SHALL NOT
-BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN CONTRACT,
-TORT, OR OTHERWISE, ARISING FROM OR IN CONNECTION WITH THE SOFTWARE OR THE
-USE OF OR OTHER DEALINGS IN THE SOFTWARE. THIS INCLUDES, WITHOUT
-LIMITATION, DAMAGE TO AUDIO EQUIPMENT, HEARING, RECORDINGS, OR DATA.
-
-## 9. Termination
-
-Your rights under this license terminate automatically if You breach any
-of its terms. If the breach is curable and You correct it within 30 days
-of becoming aware of it, Your rights are reinstated. Sections 7 and 8
-survive termination.
-
-## 10. Governing Law
-
-This license is governed by the laws of the Federative Republic of Brazil,
-including Law No. 9.609/1998 and Law No. 9.610/1998.
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
