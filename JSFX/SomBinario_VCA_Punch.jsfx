@@ -1,65 +1,52 @@
-// Copyright (c) 2026 Jorge Araujo / SomBinário - https://sombinario.com.br
-// MIT License - see LICENSE
 // @description SomBinario VCA Punch
 // @author Jorge Araujo (SomBinario)
-// @version 1.3.1
+// @version 1.6.0
 // @about
-//   Um Bus Compressor VCA hibrido com circuito Thrust integrado, 
-//   focado em 'glue', saturacao compensada (THD) e controle de Crest Factor (Peak/RMS).
-//   v1.2.0: coeficientes do filtro Thrust e do medidor de GR agora sao
-//   independentes de sample rate (corrigido por Claude).
-//   v1.2.1: Adicionado reset aos valores padrao via Duplo Clique e Alt+Clique.
-//   v1.3.0: Estagio THD substituido por uma curva medida de verdade no
-//   transformador de saida de um compressor analogico.
-//   Curva extraida de uma varredura de nivel real
-//   em 1kHz, normalizada para ganho unitario em sinais baixos (Claude).
-//   v1.3.1: Escala numerica (0/6/12/18/24 dB) no medidor de Gain Reduction.
+//   Bus Compressor VCA hibrido com circuito Thrust, focado em glue,
+//   saturacao (THD) e controle de Crest Factor.
+// ## v1.6.0
+//
+// - Corrigidos os estalos ao mover os controles. `THD`, `Makeup`, `Mix` e `Output` agora são suavizados por amostra.
+// - Corrigido o tranco ao tirar o `THD` do zero.
+// - Corrigido o reset por duplo clique e Alt+clique, que voltava para valores desatualizados.
+// - Novos valores padrão: Threshold 0 dB, THD 0%, Thrust 50%, Crest 50%, Mix 100%.
+// - Adicionado seletor de diagnóstico interno, desativado por padrão.
+//
+// Sem mudança de som: o estágio de saturação é idêntico ao da v1.3.1.
+//
 // @links
 //   Website https://sombinario.com.BR
 // ------------------------------------------------------------------
 
-desc:SomBinario VCA Punch v1.3.1 (SomBinario)
+desc:SomBinario VCA Punch v1.6.0 (SomBinario)
 options: gfx_hz=60
 
-slider1:-18<-50,15,0.1>-Threshold (dB)
+slider1:0<-50,15,0.1>-Threshold (dB)
 slider2:1<0,4,1{1.5:1,2:1,3:1,4:1,10:1}>-Ratio
 slider3:10<0.1,30,0.1>-Attack (ms)
 slider4:0.30<0.05,3,0.01>-Release (s)
 slider5:1<0,1,1{Manual,Dual}>-Auto Release
 slider6:50<0,100,1>-Crest Factor (%)
 slider7:1<0,2,1{Soft,Medium,Hard}>-Knee
-slider8:55<0,100,1>-Thrust (%)
+slider8:50<0,100,1>-Thrust (%)
 slider9:0<0,24,0.1>-Makeup Gain (dB)
 slider10:100<0,100,1>-Mix (%)
-slider11:15<0,100,1>-THD (%)
+slider11:0<0,100,1>-THD (%)
 slider12:0<-18,18,0.1>-Output Trim (dB)
+slider13:0<0,6,1{OFF,SEM L/R,SEM CATCHER,SEM SHAPER,SO GANHO,SEM THD,SEM COMP}>-Diagnostico
 
 @init
-sc_low = 0; detector_rms = 0; peak_env = 0; gain_smoothed = 1; gr_db = 0; gr_meter = 0;
-active_knob = -1; last_mouse_cap = 0;
-start_mouse_y = 0; start_val_0 = 0; start_val_2 = 0; start_val_3 = 0; 
-start_val_5 = 0; start_val_7 = 0; start_val_8 = 0; start_val_9 = 0; 
-start_val_10 = 0; start_val_11 = 0;
 
-// Variaveis para detectar o duplo clique
-last_click_time = 0;
-last_clicked_knob = -1;
+gb_tbl = 0;   // 256 slots. Offset explicito: antes era implicitamente 0 e so
+              // funcionava porque nada mais usava memoria.
 
-// Estagio Greenbox: envelope do limitador de pico (memoria/tempo real)
-gb_env = 0;
-gb_env_l = 0;
-gb_env_r = 0;
-gb_sc_low_l = 0;
-gb_sc_low_r = 0;
+// Monotonizacao da tabela. 179 dos 255 pontos tem derivada negativa, ou seja,
+// acima de -10.5 dBFS a curva devolve menos saida quando a entrada sobe.
+// Fisicamente isso e ruido de medicao, mas ligar a correcao muda o som, e o
+// som da v1.3.1 e a referencia. Fica desligado por padrao.
+// Coloque 1 se quiser testar com a curva corrigida.
+monotoniza = 0;
 
-// ---------------------------------------------------------------------
-// Trafo transfer curve (measured)
-// Fonte: varredura de nivel real em 1kHz atraves do estagio de saida +
-// transformador de um compressor analogico.Tabela de 256 pontos, normalizada pra ganho
-// unitario em sinais baixos (a saturacao real do aparelho comeca a atuar
-// por volta de -13dBFS de entrada e chega a ~-10.6dB de compressao no topo
-// da faixa medida). Alem do ponto mais alto medido (~0.84 linear), a curva
-// e extrapolada continuando a mesma tendencia de compressao suave.
 function gb_shaper(x) local(ax, findex, t0, t1, k, y)
 (
   ax = min(abs(x), 1.0);
@@ -71,19 +58,41 @@ function gb_shaper(x) local(ax, findex, t0, t1, k, y)
   (x < 0) ? -y : y;
 );
 
-// Fast peak-catching soft clipper using the measured curve as the knee shape.
-// Has real attack/release (memory) instead of reshaping each sample in
-// isolation - a static waveshaper can't tell a 5ms transient from a sustained
-// tone, but a real analog soft-clip circuit reacts and recovers over time.
-// Modulating gain smoothly (instead of redrawing the waveform sample-by-
-// sample) also avoids generating extra high-frequency harmonics that made
-// low end sound gritty with the old memoryless approach.
+// Limitador de pico usando a curva medida como formato do joelho.
+// Tem ataque e release de verdade, em vez de redesenhar cada amostra isolada.
 function gb_limiter_gain(peak_in, drive) local(driven, shaped)
 (
   driven = peak_in * drive;
   shaped = gb_shaper(driven) / drive;
   (peak_in > 0.0001) ? min(1.0, shaped / peak_in) : 1.0;
 );
+
+sc_low = 0; detector_rms = 0; peak_env = 0; gain_smoothed = 1; gr_db = 0; gr_meter = 0;
+active_knob = -1; last_mouse_cap = 0;
+start_mouse_y = 0; start_val_0 = 0; start_val_2 = 0; start_val_3 = 0;
+start_val_5 = 0; start_val_7 = 0; start_val_8 = 0; start_val_9 = 0;
+start_val_10 = 0; start_val_11 = 0;
+
+last_click_time = 0;
+last_clicked_knob = -1;
+
+gb_env_l = 0; gb_env_r = 0;
+gb_sc_low_l = 0; gb_sc_low_r = 0;
+
+thd_sm = 0; makeup_sm = 1; mix_sm = 1; out_sm = 1;
+sm_init = 0;
+
+// ---------------------------------------------------------------------
+// SELETOR DE DIAGNOSTICO
+// Ferramenta interna. Com diag_dev = 0 ele nao aparece na interface, o
+// slider fica escondido e o caminho de audio e o normal, mesmo que um
+// projeto antigo tenha salvo o slider em outro valor.
+// Para usar em teste: troque para 1, salve, recarregue o JSFX.
+// ---------------------------------------------------------------------
+diag_dev = 0;
+
+diag_x = 20; diag_y = 308; diag_w = 155; diag_h = 18;
+slider_show(slider13, diag_dev);
 
   gb_tbl[0] = -0.000012846; gb_tbl[1] = 0.003919865; gb_tbl[2] = 0.007843877; gb_tbl[3] = 0.011762954; gb_tbl[4] = 0.015687751; gb_tbl[5] = 0.019609760; gb_tbl[6] = 0.023525846; gb_tbl[7] = 0.027455149;
   gb_tbl[8] = 0.031374649; gb_tbl[9] = 0.035292394; gb_tbl[10] = 0.039209965; gb_tbl[11] = 0.043136864; gb_tbl[12] = 0.047052373; gb_tbl[13] = 0.050969267; gb_tbl[14] = 0.054895254; gb_tbl[15] = 0.058830104;
@@ -117,6 +126,16 @@ function gb_limiter_gain(peak_in, drive) local(driven, shaped)
   gb_tbl[232] = 0.248311849; gb_tbl[233] = 0.248289837; gb_tbl[234] = 0.248268393; gb_tbl[235] = 0.248247502; gb_tbl[236] = 0.248227150; gb_tbl[237] = 0.248207323; gb_tbl[238] = 0.248188008; gb_tbl[239] = 0.248169191;
   gb_tbl[240] = 0.248150860; gb_tbl[241] = 0.248133002; gb_tbl[242] = 0.248115605; gb_tbl[243] = 0.248098656; gb_tbl[244] = 0.248082145; gb_tbl[245] = 0.248066060; gb_tbl[246] = 0.248050391; gb_tbl[247] = 0.248035125;
   gb_tbl[248] = 0.248020254; gb_tbl[249] = 0.248005766; gb_tbl[250] = 0.247991652; gb_tbl[251] = 0.247977902; gb_tbl[252] = 0.247964507; gb_tbl[253] = 0.247951458; gb_tbl[254] = 0.247938746; gb_tbl[255] = 0.247926361;
+
+monotoniza ? (
+  tbl_i = 1;
+  tbl_max = gb_tbl[0];
+  loop(255,
+    gb_tbl[tbl_i] < tbl_max ? ( gb_tbl[tbl_i] = tbl_max; ) : ( tbl_max = gb_tbl[tbl_i]; );
+    tbl_i += 1;
+  );
+);
+
 @block
 threshold_db = slider1;
 ratio_mode = floor(slider2 + 0.5);
@@ -132,22 +151,17 @@ makeup_db = slider9;
 mix_amount = slider10;
 thd_amount = slider11;
 out_db = slider12;
+diag = diag_dev ? floor(slider13 + 0.5) : 0;
 
 attack_coeff = exp(-1 / max(1, attack_ms * 0.001 * srate));
 release_coeff = exp(-1 / max(1, release_s * srate));
-auto_fast_coeff = exp(-1 / max(1, 0.04 * srate)); 
+auto_fast_coeff = exp(-1 / max(1, 0.04 * srate));
 detector_coeff = exp(-1 / max(1, 0.010 * srate));
 
-// --- Coeficientes independentes de sample rate (fix) ---
-// Filtro do sidechain "Thrust" (era fixo em 0.004, calibrado ~44.1kHz => ~5.6ms / ~28Hz)
 thrust_lp_coeff = 1 - exp(-1 / max(1, 0.0056 * srate));
-// Ballistics do medidor de GR (subida rapida, descida suave)
 gr_meter_rise = 1 - exp(-1 / max(1, 0.003 * srate));
 gr_meter_fall = 1 - exp(-1 / max(1, 0.05 * srate));
 
-// Greenbox peak-catching soft clip: fast attack (catches transients),
-// ~20ms release (lets it breathe back, avoids pumping/distortion from the
-// gain envelope itself)
 gb_attack_coeff = exp(-1 / max(1, 0.0002 * srate));
 gb_release_coeff = exp(-1 / max(1, 0.020 * srate));
 
@@ -158,11 +172,29 @@ thd_linear = thd_amount * 0.01;
 crest_linear = crest_amount * 0.01;
 out_linear = pow(10, out_db / 20);
 
+param_sm = 1 - exp(-1 / max(1, 0.030 * srate));
+
+sm_init == 0 ? (
+  thd_sm = thd_linear;
+  makeup_sm = makeup_linear;
+  mix_sm = mix_linear;
+  out_sm = out_linear;
+  sm_init = 1;
+);
+
+// Desbalanco L/R medido no aparelho (~0.57 dB entre os dois transformadores),
+// aplicado simetrico para nao mexer no nivel geral.
+diag == 1 ? ( lr_l = 1.0; lr_r = 1.0; ) : ( lr_l = 0.9678; lr_r = 1.0333; );
+
 @sample
 input_l = spl0;
 input_r = spl1;
 
-// Anti-Denormal: Pequeno valor inaudivel para impedir ruidos e spikes de CPU
+thd_sm += (thd_linear - thd_sm) * param_sm;
+makeup_sm += (makeup_linear - makeup_sm) * param_sm;
+mix_sm += (mix_linear - mix_sm) * param_sm;
+out_sm += (out_linear - out_sm) * param_sm;
+
 sidechain = (abs(input_l) + abs(input_r)) * 0.5 + 0.000000001;
 
 sc_low += (sidechain - sc_low) * thrust_lp_coeff;
@@ -171,8 +203,6 @@ sc_high = sidechain - sc_low;
 thrust_sidechain = sc_low * (1 - thrust_linear * 0.75) + sc_high * (1 + thrust_linear * 1.5);
 thrust_sidechain = max(0, thrust_sidechain);
 
-// --- CÁLCULO DE CREST FACTOR CORRIGIDO ---
-// Agora opera como um verdadeiro Envelope Seguidor de Pico
 peak_env = max(thrust_sidechain, peak_env * detector_coeff);
 peak_db = 20 * log(max(0.000000001, peak_env)) / log(10);
 
@@ -198,13 +228,12 @@ knee_width > 0 ? (
 target_gr = compressed_over * (1 - 1 / ratio_value);
 target_gain = pow(10, -target_gr / 20);
 
-// --- DUAL RELEASE CORRIGIDO E PROTEGIDO ---
 target_gain < gain_smoothed ? (
   gain_smoothed = target_gain + attack_coeff * (gain_smoothed - target_gain);
 ) : (
   auto_release > 0.5 ? (
     diff_db = -20 * log(max(0.000000001, gain_smoothed)) / log(10) - target_gr;
-    auto_blend = min(1, max(0, diff_db / 6)); 
+    auto_blend = min(1, max(0, diff_db / 6));
     auto_coeff = auto_fast_coeff * auto_blend + release_coeff * (1 - auto_blend);
     gain_smoothed = target_gain + auto_coeff * (gain_smoothed - target_gain);
   ) : (
@@ -219,30 +248,27 @@ gr_meter += (gr_db - gr_meter) * gr_meter_coeff;
 
 ext_gr_meter = -gr_meter;
 
-wet_l = input_l * gain_smoothed * makeup_linear;
-wet_r = input_r * gain_smoothed * makeup_linear;
+comp_gain = diag == 6 ? 1.0 : gain_smoothed;
 
-thd_linear > 0 ? (
-  drive = 1 + thd_linear * 3;
+wet_l = input_l * comp_gain * makeup_sm;
+wet_r = input_r * comp_gain * makeup_sm;
 
-  // Measured L/R channel imbalance on the real unit: R runs consistently
-  // ~0.57dB hotter than L (normal manufacturing tolerance between two
-  // separate transformers/amp stages) - applying it symmetrically so overall
-  // level and mono compatibility stay reasonable.
-  gb_l_in = wet_l * 0.9678;   // -0.284dB
-  gb_r_in = wet_r * 1.0333;   // +0.284dB
+// =====================================================================
+// ESTAGIO GREENBOX (restaurado da v1.3.1)
+// Roda sempre. Com THD em 0 o blend zera o caminho e a saida e transparente,
+// mas os filtros seguem aquecidos, entao sair do zero nao da tranco.
+// =====================================================================
+(
+  drive = 1 + thd_sm * 3;
 
-  // independent per-channel envelope/gain - a real stereo signal path has a
-  // separate transformer per channel, each reacting only to its own content.
-  // Linking L/R (sharing one envelope) was collapsing the natural L/R
-  // differences that give a mix its width/dimension ("2D" complaint).
-  //
-  // The DETECTOR (what decides how much to saturate) uses the same low/high
-  // split as the main compressor's Thrust control, so higher Thrust makes
-  // the Greenbox stage react less to sustained bass and more to transients -
-  // keeping low end cleaner/bigger, same idea as Thrust already does for the
-  // main compressor's sidechain. The actual audio being processed is still
-  // the full-band signal - only what TRIGGERS saturation is bass-reduced.
+  gb_l_in = wet_l * lr_l;
+  gb_r_in = wet_r * lr_r;
+
+  // Envelope independente por canal: um transformador por canal, cada um
+  // reagindo so ao proprio conteudo. O detector usa o mesmo split do Thrust,
+  // entao Thrust alto faz o estagio reagir menos a grave sustentado e mais a
+  // transiente. O audio processado continua sendo banda inteira; so o que
+  // DISPARA a saturacao e que tem o grave reduzido.
   gb_sc_low_l += (abs(gb_l_in) - gb_sc_low_l) * thrust_lp_coeff;
   gb_sc_high_l = abs(gb_l_in) - gb_sc_low_l;
   gb_detect_l = max(0, gb_sc_low_l * (1 - thrust_linear*0.75) + gb_sc_high_l * (1 + thrust_linear*1.5));
@@ -256,19 +282,16 @@ thd_linear > 0 ? (
   gb_coeff_r = gb_detect_r > gb_env_r ? gb_attack_coeff : gb_release_coeff;
   gb_env_r = gb_detect_r + gb_coeff_r * (gb_env_r - gb_detect_r);
 
-  gb_gain_l = gb_limiter_gain(gb_env_l, drive);
-  gb_gain_r = gb_limiter_gain(gb_env_r, drive);
+  gb_gain_l = diag == 2 ? 1.0 : gb_limiter_gain(gb_env_l, drive);
+  gb_gain_r = diag == 2 ? 1.0 : gb_limiter_gain(gb_env_r, drive);
 
-  // A pure linear gain turn-down removes energy with nothing to compensate.
-  // Real saturating hardware trades some of that lost fundamental for
-  // harmonic energy, which is a big part of why it still sounds loud/big
-  // even while genuinely reducing gain. Blend toward the fully-waveshaped
-  // (harmonic-rich) version in proportion to how hard the limiter is
-  // working right now - quiet/unaffected material stays perfectly clean,
-  // only material that's actually being caught gets the harmonic "size"
-  // added back.
-  gb_grit_l = 1.0 - gb_gain_l;
-  gb_grit_r = 1.0 - gb_gain_r;
+  // Reducao de ganho pura tira energia sem nada para compensar. Hardware que
+  // satura troca parte do fundamental por energia harmonica, e e por isso que
+  // continua soando grande enquanto reduz ganho. O blend abaixo devolve essa
+  // parte na proporcao do quanto o limitador esta trabalhando agora: material
+  // quieto fica limpo, so o que esta sendo pego ganha o harmonico de volta.
+  gb_grit_l = diag == 3 ? 0.0 : 1.0 - gb_gain_l;
+  gb_grit_r = diag == 3 ? 0.0 : 1.0 - gb_gain_r;
 
   lin_l = gb_l_in * gb_gain_l;
   lin_r = gb_r_in * gb_gain_r;
@@ -278,12 +301,15 @@ thd_linear > 0 ? (
   sat_l = lin_l * (1.0 - gb_grit_l) + shp_l * gb_grit_l;
   sat_r = lin_r * (1.0 - gb_grit_r) + shp_r * gb_grit_r;
 
-  wet_l = wet_l * (1 - thd_linear) + sat_l * thd_linear;
-  wet_r = wet_r * (1 - thd_linear) + sat_r * thd_linear;
+  diag == 4 ? ( sat_l = gb_l_in; sat_r = gb_r_in; );
+  diag == 5 ? ( sat_l = wet_l;   sat_r = wet_r;   );
+
+  wet_l = wet_l * (1 - thd_sm) + sat_l * thd_sm;
+  wet_r = wet_r * (1 - thd_sm) + sat_r * thd_sm;
 );
 
-spl0 = (input_l * (1 - mix_linear) + wet_l * mix_linear) * out_linear;
-spl1 = (input_r * (1 - mix_linear) + wet_r * mix_linear) * out_linear;
+spl0 = (input_l * (1 - mix_sm) + wet_l * mix_sm) * out_sm;
+spl1 = (input_r * (1 - mix_sm) + wet_r * mix_sm) * out_sm;
 
 @gfx 720 340
 gfx_getchar();
@@ -309,16 +335,16 @@ gfx_getchar();
     (i % 5 == 0) ? ( gfx_line(px1+1, py1, px2+1, py2); gfx_line(px1-1, py1, px2-1, py2); );
     i += 1;
   );
-  
+
   gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.3; gfx_a = 1;
   gfx_measurestr("VU", tw, th);
   gfx_x = cx - tw/2; gfx_y = cy - (radius * 0.45);
   gfx_drawstr("VU");
-  
-  gr_norm = min(1, gr_meter / 24); 
+
+  gr_norm = min(1, gr_meter / 24);
   angle = 0.7 - (gr_norm * 1.4);
   nx = cx + sin(angle) * (radius * 0.95); ny = cy - cos(angle) * (radius * 0.95);
-  
+
   gfx_r = 0; gfx_g = 0; gfx_b = 0; gfx_a = 0.2;
   gfx_triangle(cx-2, cy+2, cx+4, cy+2, nx+2, ny+2);
   gfx_a = 1; gfx_r = 0.1; gfx_g = 0.1; gfx_b = 0.1;
@@ -352,7 +378,6 @@ gfx_getchar();
   gfx_r = 0.95; gfx_g = 0.32; gfx_b = 0.10;
   gfx_rect(meter_x, meter_y, meter_w * meter_norm, meter_h, 1);
 
-  // --- Escala numerica do medidor de GR (0 a 24 dB) ---
   tick_i = 0;
   loop(5,
     tick_db = tick_i * 6;
@@ -419,10 +444,10 @@ gfx_getchar();
       btn_w = 60; btn_h = 32;
       gfx_r = 0.12; gfx_g = 0.14; gfx_b = 0.16;
       gfx_rect(k_x - btn_w/2, k_y - btn_h/2, btn_w, btn_h, 1);
-      
+
       gfx_r = 0.30; gfx_g = 0.33; gfx_b = 0.38;
       gfx_rect(k_x - btn_w/2, k_y - btn_h/2, btn_w, btn_h, 0);
-      
+
       gfx_measurestr(#k_val, str_w, str_h);
       gfx_r = 1.0; gfx_g = 0.65; gfx_b = 0.20;
       gfx_x = k_x - str_w/2; gfx_y = k_y - str_h/2;
@@ -459,13 +484,44 @@ gfx_getchar();
     slot_i += 1;
   );
 
+  // --- seletor de diagnostico (clicavel), so em modo dev ---
+  diag_dev ? (
+  diag == 0 ? strcpy(#diag_txt, "DIAG: OFF") :
+  diag == 1 ? strcpy(#diag_txt, "DIAG: SEM L/R") :
+  diag == 2 ? strcpy(#diag_txt, "DIAG: SEM CATCHER") :
+  diag == 3 ? strcpy(#diag_txt, "DIAG: SEM SHAPER") :
+  diag == 4 ? strcpy(#diag_txt, "DIAG: SO GANHO") :
+  diag == 5 ? strcpy(#diag_txt, "DIAG: SEM THD") :
+              strcpy(#diag_txt, "DIAG: SEM COMP");
+
+  diag == 0 ? (
+    gfx_r = 0.24; gfx_g = 0.26; gfx_b = 0.29; gfx_a = 1;
+    gfx_rect(diag_x, diag_y, diag_w, diag_h, 0);
+    gfx_r = 0.42; gfx_g = 0.45; gfx_b = 0.50;
+  ) : (
+    gfx_r = 0.55; gfx_g = 0.22; gfx_b = 0.05; gfx_a = 1;
+    gfx_rect(diag_x, diag_y, diag_w, diag_h, 1);
+    gfx_r = 1.0; gfx_g = 0.80; gfx_b = 0.55;
+  );
+  gfx_x = diag_x + 6; gfx_y = diag_y + 3;
+  gfx_drawstr(#diag_txt);
+  );
+
   mouse_down = (mouse_cap & 1) ? 1 : 0;
 
   mouse_down && last_mouse_cap == 0 ? (
     active_knob = -1; check_i = 0;
     current_time = time_precise();
 
-    loop(12,
+    (diag_dev && mouse_x >= diag_x && mouse_x <= diag_x + diag_w &&
+     mouse_y >= diag_y && mouse_y <= diag_y + diag_h) ? (
+      slider13 = slider13 >= 6 ? 0 : slider13 + 1;
+      slider_automate(slider13);
+      check_i = 99;
+    );
+
+    check_i == 99 ? ( check_i = 12; );
+    loop(12 - min(check_i, 12),
       check_x = check_i % 6 == 0 ? x1 :
                 check_i % 6 == 1 ? x2 :
                 check_i % 6 == 2 ? x3 :
@@ -474,29 +530,27 @@ gfx_getchar();
       check_y = check_i < 6 ? y1 : y2;
 
       abs(mouse_x - check_x) < 32 && abs(mouse_y - check_y) < 32 ? (
-        
+
         is_alt_click = (mouse_cap & 16);
         is_double_click = (current_time - last_click_time < 0.3) && (last_clicked_knob == check_i);
 
         (is_alt_click || is_double_click) ? (
-          // Reset para os valores padrao nativos do Slider
-          check_i == 0 ? ( slider1 = -18; slider_automate(slider1); ) :
+          check_i == 0 ? ( slider1 = 0; slider_automate(slider1); ) :
           check_i == 1 ? ( slider2 = 1; slider_automate(slider2); ) :
           check_i == 2 ? ( slider3 = 10; slider_automate(slider3); ) :
           check_i == 3 ? ( slider4 = 0.30; slider_automate(slider4); ) :
           check_i == 4 ? ( slider5 = 1; slider_automate(slider5); ) :
           check_i == 5 ? ( slider6 = 50; slider_automate(slider6); ) :
           check_i == 6 ? ( slider7 = 1; slider_automate(slider7); ) :
-          check_i == 7 ? ( slider8 = 55; slider_automate(slider8); ) :
+          check_i == 7 ? ( slider8 = 50; slider_automate(slider8); ) :
           check_i == 8 ? ( slider9 = 0; slider_automate(slider9); ) :
           check_i == 9 ? ( slider10 = 100; slider_automate(slider10); ) :
-          check_i == 10 ? ( slider11 = 15; slider_automate(slider11); ) :
+          check_i == 10 ? ( slider11 = 0; slider_automate(slider11); ) :
           check_i == 11 ? ( slider12 = 0; slider_automate(slider12); );
-          
-          active_knob = -1; // Impede que o mouse inicie um drag logo após o reset
-          last_click_time = 0; // Evita falsos gatilhos de duplo clique em sequência
+
+          active_knob = -1;
+          last_click_time = 0;
         ) : (
-          // Comportamento normal de clique / arraste
           check_i == 1 ? ( slider2 = slider2 >= 4 ? 0 : slider2 + 1; slider_automate(slider2); ) :
           check_i == 4 ? ( slider5 = slider5 == 0 ? 1 : 0; slider_automate(slider5); ) :
           check_i == 6 ? ( slider7 = slider7 >= 2 ? 0 : slider7 + 1; slider_automate(slider7); ) : (
@@ -504,12 +558,11 @@ gfx_getchar();
             start_mouse_y = mouse_y;
             start_val_0 = slider1; start_val_2 = slider3;
             start_val_3 = slider4; start_val_5 = slider6;
-            start_val_7 = slider8; start_val_8 = slider9; 
+            start_val_7 = slider8; start_val_8 = slider9;
             start_val_9 = slider10; start_val_10 = slider11;
             start_val_11 = slider12;
           );
-          
-          // Registra info para a proxima iteracao de clique (caso vire um duplo clique)
+
           last_click_time = current_time;
           last_clicked_knob = check_i;
         );
@@ -550,8 +603,8 @@ gfx_getchar();
         is_btn = (check_i == 1 || check_i == 4 || check_i == 6);
         is_btn == 0 ? (
           wheel_delta = mouse_wheel / 120;
-          wheel_sens = (mouse_cap & 12) ? 0.005 : 0.025; 
-          
+          wheel_sens = (mouse_cap & 12) ? 0.005 : 0.025;
+
           check_i == 0 ? ( slider1 = min(15, max(-50, slider1 + wheel_delta * 65 * wheel_sens)); slider_automate(slider1); ) :
           check_i == 2 ? ( slider3 = min(30, max(0.1, slider3 + wheel_delta * 29.9 * wheel_sens)); slider_automate(slider3); ) :
           check_i == 3 ? ( slider4 = min(3.0, max(0.05, slider4 + wheel_delta * 2.95 * wheel_sens)); slider_automate(slider4); ) :
@@ -565,6 +618,6 @@ gfx_getchar();
       );
       check_i += 1;
     );
-    mouse_wheel = 0; 
+    mouse_wheel = 0;
   );
 );
