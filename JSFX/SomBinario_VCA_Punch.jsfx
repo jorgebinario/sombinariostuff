@@ -1,24 +1,36 @@
 // @description SomBinario VCA Punch
 // @author Jorge Araujo (SomBinario)
-// @version 1.6.0
+// @version 1.7.0
 // @about
 //   Bus Compressor VCA hibrido com circuito Thrust, focado em glue,
 //   saturacao (THD) e controle de Crest Factor.
+//
+// ## v1.7.0
+//
+// - THRUST CORRIGIDO. O filtro agia sobre o sinal ja retificado, e nessa
+//   posicao ele nao separava grave de agudo: a ondulacao da retificacao cai
+//   sempre acima do corte, qualquer que seja a frequencia de entrada. Medido,
+//   o controle em 100% variava meio decibel entre 40 Hz e 5 kHz, e ainda
+//   AUMENTAVA o nivel do detector. Agora e um tilt linear de 3 dB por oitava
+//   aplicado ao audio do sidechain antes da retificacao, como no API 2500:
+//   -15 dB em 20 Hz, 0 dB em 632 Hz, +15 dB em 20 kHz com o knob no maximo.
+//   Em 0% o filtro e transparente, entao Thrust desligado soa como antes.
+// - Interface refeita: osciloscopio com a curva de reducao de ganho sobre o
+//   envelope de nivel, linha do threshold, VU analogico com seletor de fonte
+//   (out / in / gr) e knobs chapados.
+//
 // ## v1.6.0
 //
-// - Corrigidos os estalos ao mover os controles. `THD`, `Makeup`, `Mix` e `Output` agora são suavizados por amostra.
-// - Corrigido o tranco ao tirar o `THD` do zero.
-// - Corrigido o reset por duplo clique e Alt+clique, que voltava para valores desatualizados.
-// - Novos valores padrão: Threshold 0 dB, THD 0%, Thrust 50%, Crest 50%, Mix 100%.
-// - Adicionado seletor de diagnóstico interno, desativado por padrão.
-//
-// Sem mudança de som: o estágio de saturação é idêntico ao da v1.3.1.
+// - Corrigidos os estalos ao mover os controles. THD, Makeup, Mix e Output
+//   agora sao suavizados por amostra.
+// - Corrigido o tranco ao tirar o THD do zero.
+// - Novos valores padrao: Threshold 0 dB, THD 0%, Thrust 50%, Crest 50%.
 //
 // @links
 //   Website https://sombinario.com.BR
 // ------------------------------------------------------------------
 
-desc:SomBinario VCA Punch v1.6.0 (SomBinario)
+desc:SomBinario VCA Punch v1.7.0 (SomBinario)
 options: gfx_hz=60
 
 slider1:0<-50,15,0.1>-Threshold (dB)
@@ -33,20 +45,66 @@ slider9:0<0,24,0.1>-Makeup Gain (dB)
 slider10:100<0,100,1>-Mix (%)
 slider11:0<0,100,1>-THD (%)
 slider12:0<-18,18,0.1>-Output Trim (dB)
-slider13:0<0,6,1{OFF,SEM L/R,SEM CATCHER,SEM SHAPER,SO GANHO,SEM THD,SEM COMP}>-Diagnostico
+slider13:0<0,2,1{out,in,gr}>-VU Source
+slider14:0<0,1,1{Off,On}>-Auto Makeup
 
 @init
 
-gb_tbl = 0;   // 256 slots. Offset explicito: antes era implicitamente 0 e so
-              // funcionava porque nada mais usava memoria.
+// ---------------------------------------------------------------------
+// Mapa de memoria
+// ---------------------------------------------------------------------
+gb_tbl   = 0;      // 256 pontos da curva medida do transformador
 
-// Monotonizacao da tabela. 179 dos 255 pontos tem derivada negativa, ou seja,
-// acima de -10.5 dBFS a curva devolve menos saida quando a entrada sobe.
-// Fisicamente isso e ruido de medicao, mas ligar a correcao muda o som, e o
-// som da v1.3.1 e a referencia. Fica desligado por padrao.
-// Coloque 1 se quiser testar com a curva corrigida.
-monotoniza = 0;
+tilt_b0  = 300;    // coeficientes do filtro Thrust (7 secoes)
+tilt_b1  = 310;
+tilt_a1  = 320;
 
+scl_x1   = 330;    // estados do tilt: sidechain, canal esquerdo
+scl_y1   = 340;
+scr_x1   = 350;    // sidechain, canal direito
+scr_y1   = 360;
+stl_x1   = 370;    // saturacao, canal esquerdo
+stl_y1   = 380;
+str_x1   = 390;    // saturacao, canal direito
+str_y1   = 400;
+
+scope_lvl = 1000;  // historico do nivel de saida, em dB
+scope_gr  = 1400;  // historico da reducao de ganho, em dB
+SCOPE_N   = 300;
+scope_pos = 0;
+
+// geometria da interface
+MARGIN = 16;
+VU_W   = 152;
+CELL_W = 128;
+CELL_H = 86;
+ROW1_Y = 186;
+ROW2_Y = 272;
+SCOPE_X = MARGIN;
+SCOPE_Y = 56;
+SCOPE_W = 800 - MARGIN*2 - VU_W - 14;
+SCOPE_H = 122;
+SCOPE_PLOT_W = SCOPE_W - 34;
+VU_X = 800 - MARGIN - VU_W;
+VU_Y = 16;
+VU_H = 138;
+AMK_X = MARGIN + 2*CELL_W + CELL_W - 34;   // botao "A" na celula do Makeup
+AMK_Y = ROW2_Y + 12;
+AMK_W = 24;
+AMK_H = 16;
+
+PILL_Y = VU_Y + VU_H + 4;
+PILL_W = floor((VU_W - 12) / 3);
+DB_TOP = 0; DB_BOT = -54;
+shown_gr = 0; shown_out = -60;
+
+TILT_N   = 7;      // secoes do tilt
+TILT_F0  = 15;     // faixa em que a inclinacao e valida
+TILT_F1  = 15000;
+
+// ---------------------------------------------------------------------
+// Curva do transformador
+// ---------------------------------------------------------------------
 function gb_shaper(x) local(ax, findex, t0, t1, k, y)
 (
   ax = min(abs(x), 1.0);
@@ -67,32 +125,138 @@ function gb_limiter_gain(peak_in, drive) local(driven, shaped)
   (peak_in > 0.0001) ? min(1.0, shaped / peak_in) : 1.0;
 );
 
-sc_low = 0; detector_rms = 0; peak_env = 0; gain_smoothed = 1; gr_db = 0; gr_meter = 0;
-active_knob = -1; last_mouse_cap = 0;
-start_mouse_y = 0; start_val_0 = 0; start_val_2 = 0; start_val_3 = 0;
-start_val_5 = 0; start_val_7 = 0; start_val_8 = 0; start_val_9 = 0;
-start_val_10 = 0; start_val_11 = 0;
+// ---------------------------------------------------------------------
+// THRUST
+//
+// Tilt linear de 3 dB por oitava, o inverso da curva do ruido rosa, como no
+// circuito do API 2500. Aplicado ao AUDIO do sidechain, antes da retificacao.
+//
+// Ate a v1.6 o filtro agia sobre o sinal ja retificado. Nessa posicao ele nao
+// funciona: retificar uma senoide produz um termo continuo e uma ondulacao no
+// dobro da frequencia, e a razao entre os dois e fixa, nao importa a
+// frequencia de entrada. Tanto 50 Hz quanto 5 kHz caiam inteiros no lado
+// "alto" do filtro e recebiam o mesmo reforco.
+//
+// A inclinacao fracionaria e aproximada por secoes de primeira ordem, cada
+// uma com um zero abaixo de um polo, espalhadas em escala logaritmica. A
+// separacao entre zero e polo e proporcional ao knob, entao em 0% zero e polo
+// coincidem e o filtro vira identidade.
+// ---------------------------------------------------------------------
+function make_tilt(thrust) local(total, perdb, step, r, i, c, fz, fp, a, b, inv, norm, maxf)
+(
+  thrust < 0.0005 ? (
+    i = 0;
+    loop(TILT_N,
+      tilt_b0[i] = 1; tilt_b1[i] = 0; tilt_a1[i] = 0;
+      i += 1;
+    );
+  ) : (
+    total = 10 * log10(TILT_F1 / TILT_F0);
+    perdb = total / TILT_N;
+    step  = pow(TILT_F1 / TILT_F0, 1.0 / TILT_N);
+    r     = sqrt(pow(10, perdb * thrust / 20));
+    norm  = pow(10, -(10 * log10(632.5 / TILT_F0)) * thrust / 20);
+    maxf  = 0.45 * srate;
 
-last_click_time = 0;
-last_clicked_knob = -1;
+    i = 0;
+    loop(TILT_N,
+      c  = TILT_F0 * pow(step, i + 0.5);
+      fz = min(c / r, maxf);
+      fp = min(c * r, maxf);
+      a  = 1.0 / tan($pi * fz / srate);
+      b  = 1.0 / tan($pi * fp / srate);
+      inv = 1.0 / (1.0 + b);
+      tilt_b0[i] = (1 + a) * inv;
+      tilt_b1[i] = (1 - a) * inv;
+      tilt_a1[i] = (1 - b) * inv;
+      i += 1;
+    );
 
+    tilt_b0[0] *= norm;
+    tilt_b1[0] *= norm;
+  );
+);
+
+function tilt_run(x, xs, ys) local(i, y)
+(
+  i = 0;
+  loop(TILT_N,
+    y = tilt_b0[i]*x + tilt_b1[i]*xs[i] - tilt_a1[i]*ys[i];
+    xs[i] = x;
+    ys[i] = y;
+    x = y;
+    i += 1;
+  );
+  x;
+);
+
+// ---------------------------------------------------------------------
+// Estado
+// ---------------------------------------------------------------------
+detector_rms = 0; peak_env = 0; gain_smoothed = 1; gr_db = 0; gr_meter = 0;
 gb_env_l = 0; gb_env_r = 0;
-gb_sc_low_l = 0; gb_sc_low_r = 0;
 
 thd_sm = 0; makeup_sm = 1; mix_sm = 1; out_sm = 1;
 sm_init = 0;
 
-// ---------------------------------------------------------------------
-// SELETOR DE DIAGNOSTICO
-// Ferramenta interna. Com diag_dev = 0 ele nao aparece na interface, o
-// slider fica escondido e o caminho de audio e o normal, mesmo que um
-// projeto antigo tenha salvo o slider em outro valor.
-// Para usar em teste: troque para 1, salve, recarregue o JSFX.
-// ---------------------------------------------------------------------
-diag_dev = 0;
+out_peak = 0; in_peak = 0;
+vu_sq_in = 0; vu_sq_out = 0; vu_db = -60;
 
-diag_x = 20; diag_y = 308; diag_w = 155; diag_h = 18;
-slider_show(slider13, diag_dev);
+last_thrust_c = -1; last_srate_c = -1;
+auto_makeup = 0;
+
+active_knob = -1; last_mouse_cap = 0;
+start_mouse_y = 0;
+start_val_0 = 0; start_val_2 = 0; start_val_3 = 0;
+start_val_5 = 0; start_val_7 = 0; start_val_8 = 0;
+start_val_9 = 0; start_val_10 = 0; start_val_11 = 0;
+last_click_time = 0; last_clicked_knob = -1;
+
+i = 0;
+loop(SCOPE_N, scope_lvl[i] = -54; scope_gr[i] = 0; i += 1; );
+
+// ---------------------------------------------------------------------
+// Desenho
+// ---------------------------------------------------------------------
+function col_bg()      ( gfx_set(0.086, 0.094, 0.110, 1); );
+function col_panel()   ( gfx_set(0.059, 0.067, 0.082, 1); );
+function col_panelalt()( gfx_set(0.106, 0.118, 0.137, 1); );
+function col_grid()    ( gfx_set(0.110, 0.125, 0.153, 1); );
+function col_track()   ( gfx_set(0.157, 0.173, 0.200, 1); );
+function col_accent(a) ( gfx_set(0.949, 0.545, 0.188, a); );
+function col_signal(a) ( gfx_set(0.553, 0.584, 0.627, a); );
+function col_label()   ( gfx_set(0.427, 0.463, 0.506, 1); );
+function col_value()   ( gfx_set(0.875, 0.894, 0.918, 1); );
+function col_title()   ( gfx_set(0.933, 0.945, 0.961, 1); );
+
+function txt_c(str, cx, cy) local(w, h)
+(
+  gfx_measurestr(str, w, h);
+  gfx_x = cx - w * 0.5; gfx_y = cy;
+  gfx_drawstr(str);
+);
+
+function txt_r(str, rx, ty) local(w, h)
+(
+  gfx_measurestr(str, w, h);
+  gfx_x = rx - w; gfx_y = ty;
+  gfx_drawstr(str);
+);
+
+// arco espesso, desenhado como varios arcos concentricos
+function thick_arc(cx, cy, r, a1, a2, th) local(i)
+(
+  i = 0;
+  loop(th, gfx_arc(cx, cy, r - th*0.5 + i, a1, a2, 1); i += 1; );
+);
+
+function y_for_db(db) local(d)
+(
+  d = max(DB_BOT, min(DB_TOP, db));
+  SCOPE_Y + (DB_TOP - d) / (DB_TOP - DB_BOT) * SCOPE_H;
+);
+
+slider_show(slider13, 0);   // fonte do VU: controlada pelos botoes da interface
 
   gb_tbl[0] = -0.000012846; gb_tbl[1] = 0.003919865; gb_tbl[2] = 0.007843877; gb_tbl[3] = 0.011762954; gb_tbl[4] = 0.015687751; gb_tbl[5] = 0.019609760; gb_tbl[6] = 0.023525846; gb_tbl[7] = 0.027455149;
   gb_tbl[8] = 0.031374649; gb_tbl[9] = 0.035292394; gb_tbl[10] = 0.039209965; gb_tbl[11] = 0.043136864; gb_tbl[12] = 0.047052373; gb_tbl[13] = 0.050969267; gb_tbl[14] = 0.054895254; gb_tbl[15] = 0.058830104;
@@ -127,15 +291,6 @@ slider_show(slider13, diag_dev);
   gb_tbl[240] = 0.248150860; gb_tbl[241] = 0.248133002; gb_tbl[242] = 0.248115605; gb_tbl[243] = 0.248098656; gb_tbl[244] = 0.248082145; gb_tbl[245] = 0.248066060; gb_tbl[246] = 0.248050391; gb_tbl[247] = 0.248035125;
   gb_tbl[248] = 0.248020254; gb_tbl[249] = 0.248005766; gb_tbl[250] = 0.247991652; gb_tbl[251] = 0.247977902; gb_tbl[252] = 0.247964507; gb_tbl[253] = 0.247951458; gb_tbl[254] = 0.247938746; gb_tbl[255] = 0.247926361;
 
-monotoniza ? (
-  tbl_i = 1;
-  tbl_max = gb_tbl[0];
-  loop(255,
-    gb_tbl[tbl_i] < tbl_max ? ( gb_tbl[tbl_i] = tbl_max; ) : ( tbl_max = gb_tbl[tbl_i]; );
-    tbl_i += 1;
-  );
-);
-
 @block
 threshold_db = slider1;
 ratio_mode = floor(slider2 + 0.5);
@@ -151,19 +306,52 @@ makeup_db = slider9;
 mix_amount = slider10;
 thd_amount = slider11;
 out_db = slider12;
-diag = diag_dev ? floor(slider13 + 0.5) : 0;
+vu_src = floor(slider13 + 0.5);
 
 attack_coeff = exp(-1 / max(1, attack_ms * 0.001 * srate));
 release_coeff = exp(-1 / max(1, release_s * srate));
 auto_fast_coeff = exp(-1 / max(1, 0.04 * srate));
 detector_coeff = exp(-1 / max(1, 0.010 * srate));
 
-thrust_lp_coeff = 1 - exp(-1 / max(1, 0.0056 * srate));
 gr_meter_rise = 1 - exp(-1 / max(1, 0.003 * srate));
 gr_meter_fall = 1 - exp(-1 / max(1, 0.05 * srate));
 
 gb_attack_coeff = exp(-1 / max(1, 0.0002 * srate));
 gb_release_coeff = exp(-1 / max(1, 0.020 * srate));
+
+vu_coeff = 1 - exp(-1 / max(1, 0.300 * srate));
+
+// ---------------------------------------------------------------------
+// Auto makeup: devolve a reducao que o compressor aplicaria a um sinal em
+// -10 dBFS, tres decibeis abaixo. Referenciar em 0 dBFS compensaria demais,
+// porque programa de barramento nao mora perto do topo.
+// ---------------------------------------------------------------------
+auto_makeup = floor(slider14 + 0.5);
+
+auto_makeup ? (
+  amk_over = -10 - threshold_db;
+
+  knee_width > 0 ? (
+    amk_over <= -knee_width * 0.5 ? (
+      amk_comp = 0;
+    ) : amk_over >= knee_width * 0.5 ? (
+      amk_comp = amk_over;
+    ) : (
+      amk_comp = sqr(amk_over + knee_width * 0.5) / (2 * knee_width);
+    );
+  ) : (
+    amk_comp = max(0, amk_over);
+  );
+
+  amk_target = max(0, min(24, amk_comp * (1 - 1 / ratio_value) - 3));
+
+  abs(slider9 - amk_target) > 0.05 ? (
+    slider9 = amk_target;
+    slider_automate(slider9);
+  );
+
+  makeup_db = slider9;
+);
 
 thrust_linear = thrust_amount * 0.01;
 makeup_linear = pow(10, makeup_db / 20);
@@ -171,6 +359,13 @@ mix_linear = mix_amount * 0.01;
 thd_linear = thd_amount * 0.01;
 crest_linear = crest_amount * 0.01;
 out_linear = pow(10, out_db / 20);
+
+// coeficientes do Thrust: so recalcula quando muda de verdade
+(thrust_linear != last_thrust_c || srate != last_srate_c) ? (
+  make_tilt(thrust_linear);
+  last_thrust_c = thrust_linear;
+  last_srate_c = srate;
+);
 
 param_sm = 1 - exp(-1 / max(1, 0.030 * srate));
 
@@ -184,7 +379,7 @@ sm_init == 0 ? (
 
 // Desbalanco L/R medido no aparelho (~0.57 dB entre os dois transformadores),
 // aplicado simetrico para nao mexer no nivel geral.
-diag == 1 ? ( lr_l = 1.0; lr_r = 1.0; ) : ( lr_l = 0.9678; lr_r = 1.0333; );
+lr_l = 0.9678; lr_r = 1.0333;
 
 @sample
 input_l = spl0;
@@ -195,19 +390,17 @@ makeup_sm += (makeup_linear - makeup_sm) * param_sm;
 mix_sm += (mix_linear - mix_sm) * param_sm;
 out_sm += (out_linear - out_sm) * param_sm;
 
-sidechain = (abs(input_l) + abs(input_r)) * 0.5 + 0.000000001;
+// ---- Thrust: tilt no sinal, por canal, e so entao retificacao ----
+tilt_l = tilt_run(input_l, scl_x1, scl_y1);
+tilt_r = tilt_run(input_r, scr_x1, scr_y1);
 
-sc_low += (sidechain - sc_low) * thrust_lp_coeff;
-sc_high = sidechain - sc_low;
-
-thrust_sidechain = sc_low * (1 - thrust_linear * 0.75) + sc_high * (1 + thrust_linear * 1.5);
-thrust_sidechain = max(0, thrust_sidechain);
+thrust_sidechain = (abs(tilt_l) + abs(tilt_r)) * 0.5 + 0.000000001;
 
 peak_env = max(thrust_sidechain, peak_env * detector_coeff);
-peak_db = 20 * log(max(0.000000001, peak_env)) / log(10);
+peak_db = 20 * log10(max(0.000000001, peak_env));
 
 detector_rms += (thrust_sidechain * thrust_sidechain - detector_rms) * (1 - detector_coeff);
-rms_db = 20 * log(max(0.000000001, sqrt(detector_rms))) / log(10);
+rms_db = 20 * log10(max(0.000000001, sqrt(detector_rms)));
 
 detector_db = peak_db * (1 - crest_linear) + rms_db * crest_linear;
 
@@ -232,7 +425,7 @@ target_gain < gain_smoothed ? (
   gain_smoothed = target_gain + attack_coeff * (gain_smoothed - target_gain);
 ) : (
   auto_release > 0.5 ? (
-    diff_db = -20 * log(max(0.000000001, gain_smoothed)) / log(10) - target_gr;
+    diff_db = -20 * log10(max(0.000000001, gain_smoothed)) - target_gr;
     auto_blend = min(1, max(0, diff_db / 6));
     auto_coeff = auto_fast_coeff * auto_blend + release_coeff * (1 - auto_blend);
     gain_smoothed = target_gain + auto_coeff * (gain_smoothed - target_gain);
@@ -241,20 +434,18 @@ target_gain < gain_smoothed ? (
   );
 );
 
-gr_db = max(0, -20 * log(max(0.0000001, gain_smoothed)) / log(10));
+gr_db = max(0, -20 * log10(max(0.0000001, gain_smoothed)));
 
 gr_meter_coeff = gr_db > gr_meter ? gr_meter_rise : gr_meter_fall;
 gr_meter += (gr_db - gr_meter) * gr_meter_coeff;
 
 ext_gr_meter = -gr_meter;
 
-comp_gain = diag == 6 ? 1.0 : gain_smoothed;
-
-wet_l = input_l * comp_gain * makeup_sm;
-wet_r = input_r * comp_gain * makeup_sm;
+wet_l = input_l * gain_smoothed * makeup_sm;
+wet_r = input_r * gain_smoothed * makeup_sm;
 
 // =====================================================================
-// ESTAGIO GREENBOX (restaurado da v1.3.1)
+// ESTAGIO DO TRANSFORMADOR
 // Roda sempre. Com THD em 0 o blend zera o caminho e a saida e transparente,
 // mas os filtros seguem aquecidos, entao sair do zero nao da tranco.
 // =====================================================================
@@ -265,33 +456,27 @@ wet_r = input_r * comp_gain * makeup_sm;
   gb_r_in = wet_r * lr_r;
 
   // Envelope independente por canal: um transformador por canal, cada um
-  // reagindo so ao proprio conteudo. O detector usa o mesmo split do Thrust,
-  // entao Thrust alto faz o estagio reagir menos a grave sustentado e mais a
-  // transiente. O audio processado continua sendo banda inteira; so o que
-  // DISPARA a saturacao e que tem o grave reduzido.
-  gb_sc_low_l += (abs(gb_l_in) - gb_sc_low_l) * thrust_lp_coeff;
-  gb_sc_high_l = abs(gb_l_in) - gb_sc_low_l;
-  gb_detect_l = max(0, gb_sc_low_l * (1 - thrust_linear*0.75) + gb_sc_high_l * (1 + thrust_linear*1.5));
-
-  gb_sc_low_r += (abs(gb_r_in) - gb_sc_low_r) * thrust_lp_coeff;
-  gb_sc_high_r = abs(gb_r_in) - gb_sc_low_r;
-  gb_detect_r = max(0, gb_sc_low_r * (1 - thrust_linear*0.75) + gb_sc_high_r * (1 + thrust_linear*1.5));
+  // reagindo so ao proprio conteudo. O detector usa o mesmo tilt do Thrust,
+  // entao Thrust alto faz o estagio reagir menos a grave e mais a agudo.
+  // O audio processado continua sendo banda inteira; so o que DISPARA a
+  // saturacao e que tem a resposta inclinada.
+  gb_detect_l = abs(tilt_run(gb_l_in, stl_x1, stl_y1));
+  gb_detect_r = abs(tilt_run(gb_r_in, str_x1, str_y1));
 
   gb_coeff_l = gb_detect_l > gb_env_l ? gb_attack_coeff : gb_release_coeff;
   gb_env_l = gb_detect_l + gb_coeff_l * (gb_env_l - gb_detect_l);
   gb_coeff_r = gb_detect_r > gb_env_r ? gb_attack_coeff : gb_release_coeff;
   gb_env_r = gb_detect_r + gb_coeff_r * (gb_env_r - gb_detect_r);
 
-  gb_gain_l = diag == 2 ? 1.0 : gb_limiter_gain(gb_env_l, drive);
-  gb_gain_r = diag == 2 ? 1.0 : gb_limiter_gain(gb_env_r, drive);
+  gb_gain_l = gb_limiter_gain(gb_env_l, drive);
+  gb_gain_r = gb_limiter_gain(gb_env_r, drive);
 
   // Reducao de ganho pura tira energia sem nada para compensar. Hardware que
   // satura troca parte do fundamental por energia harmonica, e e por isso que
   // continua soando grande enquanto reduz ganho. O blend abaixo devolve essa
-  // parte na proporcao do quanto o limitador esta trabalhando agora: material
-  // quieto fica limpo, so o que esta sendo pego ganha o harmonico de volta.
-  gb_grit_l = diag == 3 ? 0.0 : 1.0 - gb_gain_l;
-  gb_grit_r = diag == 3 ? 0.0 : 1.0 - gb_gain_r;
+  // parte na proporcao do quanto o limitador esta trabalhando agora.
+  gb_grit_l = 1.0 - gb_gain_l;
+  gb_grit_r = 1.0 - gb_gain_r;
 
   lin_l = gb_l_in * gb_gain_l;
   lin_r = gb_r_in * gb_gain_r;
@@ -301,9 +486,6 @@ wet_r = input_r * comp_gain * makeup_sm;
   sat_l = lin_l * (1.0 - gb_grit_l) + shp_l * gb_grit_l;
   sat_r = lin_r * (1.0 - gb_grit_r) + shp_r * gb_grit_r;
 
-  diag == 4 ? ( sat_l = gb_l_in; sat_r = gb_r_in; );
-  diag == 5 ? ( sat_l = wet_l;   sat_r = wet_r;   );
-
   wet_l = wet_l * (1 - thd_sm) + sat_l * thd_sm;
   wet_r = wet_r * (1 - thd_sm) + sat_r * thd_sm;
 );
@@ -311,226 +493,299 @@ wet_r = input_r * comp_gain * makeup_sm;
 spl0 = (input_l * (1 - mix_sm) + wet_l * mix_sm) * out_sm;
 spl1 = (input_r * (1 - mix_sm) + wet_r * mix_sm) * out_sm;
 
-@gfx 720 340
+// ---- medicao ----
+in_peak  = max(in_peak,  max(abs(input_l), abs(input_r)));
+out_peak = max(out_peak, max(abs(spl0), abs(spl1)));
+
+mono_in  = (input_l + input_r) * 0.5;
+mono_out = (spl0 + spl1) * 0.5;
+vu_sq_in  += (mono_in  * mono_in  - vu_sq_in)  * vu_coeff;
+vu_sq_out += (mono_out * mono_out - vu_sq_out) * vu_coeff;
+
+@gfx 800 376
 gfx_getchar();
 
-(gfx_w < 500 || gfx_h < 250) ? (
-  gfx_r = 0.92; gfx_g = 0.91; gfx_b = 0.86; gfx_a = 1;
-  gfx_rect(0, 0, gfx_w, gfx_h, 1);
-  gfx_r = 0.1; gfx_g = 0.1; gfx_b = 0.1; gfx_a = 0.5;
-  gfx_rect(0, 0, gfx_w, gfx_h, 0);
-  gfx_rect(1, 1, gfx_w-2, gfx_h-2, 0);
+// ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// Historico do osciloscopio
+// ---------------------------------------------------------------------
+cur_out_db = 20 * log10(max(0.0001, out_peak));
+cur_in_db  = 20 * log10(max(0.0001, in_peak));
+out_peak = 0; in_peak = 0;
 
-  radius = min(gfx_w * 0.8, gfx_h * 0.8);
-  cx = gfx_w * 0.5; cy = gfx_h * 0.85;
+scope_lvl[scope_pos] = cur_out_db;
+scope_gr[scope_pos]  = gr_meter;
+scope_pos += 1;
+scope_pos >= SCOPE_N ? scope_pos = 0;
 
-  i = 0;
-  loop(21,
-    a = 0.7 - (i/20) * 1.4;
-    len = (i % 5 == 0) ? radius * 0.15 : radius * 0.05;
-    i > 15 ? (gfx_r = 0.8; gfx_g = 0.2; gfx_b = 0.1; gfx_a = 1;) : (gfx_r = 0.2; gfx_g = 0.2; gfx_b = 0.2; gfx_a = 0.8;);
-    px1 = cx + sin(a) * (radius - len); py1 = cy - cos(a) * (radius - len);
-    px2 = cx + sin(a) * radius; py2 = cy - cos(a) * radius;
-    gfx_line(px1, py1, px2, py2);
-    (i % 5 == 0) ? ( gfx_line(px1+1, py1, px2+1, py2); gfx_line(px1-1, py1, px2-1, py2); );
-    i += 1;
+shown_gr  = max(gr_meter,  shown_gr  - 1.5);
+shown_out = max(cur_out_db, shown_out - 3);
+
+// ---------------------------------------------------------------------
+// Fundo e cabecalho
+// ---------------------------------------------------------------------
+col_bg(); gfx_rect(0, 0, gfx_w, gfx_h, 1);
+
+gfx_setfont(1, "Arial", 11, 'b');
+col_accent(1); gfx_x = MARGIN + 2; gfx_y = 14; gfx_drawstr("SOMBINARIO");
+
+gfx_setfont(2, "Arial", 21, 'b');
+col_title(); gfx_x = MARGIN + 2; gfx_y = 27; gfx_drawstr("VCA Punch");
+
+num_right = SCOPE_X + SCOPE_W;
+
+gfx_setfont(1, "Arial", 11, 'b');
+col_label();
+txt_r("GR",  num_right - 100, 16);
+txt_r("OUT", num_right, 16);
+
+gfx_setfont(2, "Arial", 21, 'b');
+col_accent(1);
+sprintf(#s, "-%.1f", shown_gr);
+txt_r(#s, num_right - 100, 30);
+
+col_signal(1);
+sprintf(#s, "%.1f", max(-99, shown_out));
+txt_r(#s, num_right, 30);
+
+// ---------------------------------------------------------------------
+// Osciloscopio
+// ---------------------------------------------------------------------
+col_panel(); gfx_rect(SCOPE_X, SCOPE_Y, SCOPE_W, SCOPE_H, 1);
+
+col_grid();
+g_i = 1;
+loop(4,
+  gy = y_for_db(-12 * g_i);
+  gfx_line(SCOPE_X, gy, SCOPE_X + SCOPE_PLOT_W, gy);
+  g_i += 1;
+);
+
+// linha do threshold
+thr_y = y_for_db(slider1);
+gfx_set(0.239, 0.251, 0.282, 1);
+dx = 0;
+loop(floor(SCOPE_PLOT_W / 12),
+  gfx_line(SCOPE_X + dx, thr_y, SCOPE_X + dx + 6, thr_y);
+  dx += 12;
+);
+
+// envelope de nivel e curva de reducao
+px_step = SCOPE_PLOT_W / (SCOPE_N - 1);
+s_i = 0;
+prev_lx = 0; prev_ly = 0; prev_gy = 0;
+loop(SCOPE_N,
+  idx = scope_pos + s_i;
+  idx >= SCOPE_N ? idx -= SCOPE_N;
+
+  lx = SCOPE_X + s_i * px_step;
+  ly = y_for_db(scope_lvl[idx]);
+  gy = y_for_db(-scope_gr[idx]);
+
+  col_signal(0.22);
+  gfx_line(lx, ly, lx, SCOPE_Y + SCOPE_H);
+
+  s_i > 0 ? (
+    col_signal(0.85);
+    gfx_line(prev_lx, prev_ly, lx, ly, 1);
+    col_accent(1);
+    gfx_line(prev_lx, prev_gy, lx, gy, 1);
+    gfx_line(prev_lx, prev_gy - 1, lx, gy - 1, 1);
   );
 
-  gfx_r = 0.3; gfx_g = 0.3; gfx_b = 0.3; gfx_a = 1;
-  gfx_measurestr("VU", tw, th);
-  gfx_x = cx - tw/2; gfx_y = cy - (radius * 0.45);
-  gfx_drawstr("VU");
+  prev_lx = lx; prev_ly = ly; prev_gy = gy;
+  s_i += 1;
+);
 
-  gr_norm = min(1, gr_meter / 24);
-  angle = 0.7 - (gr_norm * 1.4);
-  nx = cx + sin(angle) * (radius * 0.95); ny = cy - cos(angle) * (radius * 0.95);
+// escala em dB
+gfx_setfont(1, "Arial", 11);
+gfx_set(0.337, 0.369, 0.404, 1);
+d_i = 0;
+loop(5,
+  txt_r(sprintf(#s, "%d", -12 * d_i), SCOPE_X + SCOPE_W - 2, y_for_db(-12 * d_i) - 7);
+  d_i += 1;
+);
 
-  gfx_r = 0; gfx_g = 0; gfx_b = 0; gfx_a = 0.2;
-  gfx_triangle(cx-2, cy+2, cx+4, cy+2, nx+2, ny+2);
-  gfx_a = 1; gfx_r = 0.1; gfx_g = 0.1; gfx_b = 0.1;
-  gfx_triangle(cx-3, cy, cx+3, cy, nx, ny);
-  gfx_r = 0.15; gfx_g = 0.15; gfx_b = 0.15;
-  gfx_circle(cx, cy, 6, 1);
-  gfx_r = 0.8; gfx_g = 0.8; gfx_b = 0.8;
-  gfx_circle(cx-1, cy-1, 1.5, 1);
+// ---------------------------------------------------------------------
+// VU analogico
+// ---------------------------------------------------------------------
+col_panelalt(); gfx_rect(VU_X, VU_Y, VU_W, VU_H, 1);
 
+vu_cx = VU_X + VU_W * 0.5;
+vu_cy = VU_Y + 86;
+vu_r  = 58;
+
+gfx_set(0.200, 0.220, 0.247, 1);
+thick_arc(vu_cx, vu_cy, vu_r, -1.047, 1.047, 2);
+
+gfx_set(0.784, 0.271, 0.165, 1);
+thick_arc(vu_cx, vu_cy, vu_r, 0.611, 1.047, 3);
+
+// marcas
+gfx_setfont(1, "Arial", 10);
+m_i = 0;
+loop(6,
+  mf = m_i == 0 ? 0 : m_i == 1 ? 0.22 : m_i == 2 ? 0.44 : m_i == 3 ? 0.62 : m_i == 4 ? 0.79 : 1.0;
+  ma = -1.047 + mf * 2.094;
+  mf >= 0.62 ? gfx_set(0.847, 0.380, 0.290, 1) : gfx_set(0.369, 0.400, 0.435, 1);
+  gfx_line(vu_cx + sin(ma)*(vu_r-7), vu_cy - cos(ma)*(vu_r-7),
+           vu_cx + sin(ma)*vu_r,     vu_cy - cos(ma)*vu_r);
+  txt_c(m_i == 0 ? "-20" : m_i == 1 ? "-10" : m_i == 2 ? "-5" :
+        m_i == 3 ? "0" : m_i == 4 ? "+2" : "+3",
+        vu_cx + sin(ma)*(vu_r-17), vu_cy - cos(ma)*(vu_r-17) - 5);
+  m_i += 1;
+);
+
+gfx_set(0.306, 0.337, 0.373, 1);
+gfx_setfont(1, "Arial", 10, 'b');
+txt_c("VU", vu_cx, vu_cy - 28);
+
+// ponteiro
+vu_src == 2 ? (
+  vu_frac = max(0, min(1, 0.62 - gr_meter / 20 * 0.62));
 ) : (
-  gfx_r = 0.08; gfx_g = 0.09; gfx_b = 0.10; gfx_a = 1;
-  gfx_rect(0, 0, gfx_w, gfx_h, 1);
+  vu_db = 20 * log10(max(0.000001, sqrt(vu_src == 1 ? vu_sq_in : vu_sq_out))) + 9;
+  vu_frac = max(0, min(1, (vu_db + 20) / 23));
+);
 
-  gfx_r = 0.13; gfx_g = 0.15; gfx_b = 0.17;
-  gfx_rect(16, 12, gfx_w - 32, 46, 1);
+vu_a = -1.047 + vu_frac * 2.094;
+gfx_set(0.910, 0.925, 0.945, 1);
+gfx_line(vu_cx, vu_cy, vu_cx + sin(vu_a)*(vu_r-8), vu_cy - cos(vu_a)*(vu_r-8), 1);
+gfx_set(0.165, 0.180, 0.208, 1);
+gfx_circle(vu_cx, vu_cy, 5, 1, 1);
+gfx_set(0.545, 0.576, 0.612, 1);
+gfx_circle(vu_cx, vu_cy, 2, 1, 1);
 
-  gfx_r = 0.90; gfx_g = 0.92; gfx_b = 0.95;
-  gfx_x = 26; gfx_y = 18;
-  gfx_drawstr("SomBinario VCA Punch");
-
-  gfx_r = 0.55; gfx_g = 0.58; gfx_b = 0.62;
-  gfx_x = 26; gfx_y = 34;
-  gfx_drawstr("BUS COMPRESSOR VCA");
-
-  meter_x = 260; meter_y = 26; meter_w = gfx_w - 380; meter_h = 16;
-  meter_norm = min(1, gr_meter / 24);
-
-  gfx_r = 0.05; gfx_g = 0.06; gfx_b = 0.07;
-  gfx_rect(meter_x, meter_y, meter_w, meter_h, 1);
-
-  gfx_r = 0.95; gfx_g = 0.32; gfx_b = 0.10;
-  gfx_rect(meter_x, meter_y, meter_w * meter_norm, meter_h, 1);
-
-  tick_i = 0;
-  loop(5,
-    tick_db = tick_i * 6;
-    tick_x = meter_x + meter_w * (tick_db / 24);
-
-    gfx_a = 1;
-    gfx_r = 0.35; gfx_g = 0.38; gfx_b = 0.42;
-    gfx_line(tick_x, meter_y + meter_h, tick_x, meter_y + meter_h + 3);
-
-    sprintf(#tick_text, "%d", tick_db);
-    gfx_measurestr(#tick_text, tick_w, tick_h);
-    tick_tx = max(meter_x, min(meter_x + meter_w - tick_w, tick_x - tick_w * 0.5));
-
-    gfx_r = 0.50; gfx_g = 0.53; gfx_b = 0.58;
-    gfx_x = tick_tx; gfx_y = meter_y + meter_h + 4;
-    gfx_drawstr(#tick_text);
-
-    tick_i += 1;
-  );
-
-  gfx_r = 0.75; gfx_g = 0.78; gfx_b = 0.82;
-  gfx_x = meter_x; gfx_y = meter_y - 12;
-  gfx_drawstr("GAIN REDUCTION");
-
-  gfx_r = 1.0; gfx_g = 0.60; gfx_b = 0.15;
-  gfx_x = meter_x + meter_w + 10; gfx_y = meter_y + 1;
-  sprintf(#gr_text, "-%.1f dB", gr_meter);
-  gfx_drawstr(#gr_text);
-
-  x1 = 60; x2 = 180; x3 = 300; x4 = 420; x5 = 540; x6 = 660;
-  y1 = 125; y2 = 245;
-
-  slot_i = 0;
-  loop(12,
-    k_x = slot_i % 6 == 0 ? x1 :
-          slot_i % 6 == 1 ? x2 :
-          slot_i % 6 == 2 ? x3 :
-          slot_i % 6 == 3 ? x4 :
-          slot_i % 6 == 4 ? x5 : x6;
-    k_y = slot_i < 6 ? y1 : y2;
-
-    slot_i == 0 ? ( k_norm = (slider1 + 50) / 65; k_lbl = "THRESHOLD"; sprintf(#k_val, "%.1f dB", slider1); ) :
-    slot_i == 1 ? ( k_lbl = "RATIO";
-                    slider2 == 0 ? strcpy(#k_val, "1.5:1") :
-                    slider2 == 1 ? strcpy(#k_val, "2:1") :
-                    slider2 == 2 ? strcpy(#k_val, "3:1") :
-                    slider2 == 3 ? strcpy(#k_val, "4:1") : strcpy(#k_val, "10:1"); ) :
-    slot_i == 2 ? ( k_norm = (slider3 - 0.1) / 29.9; k_lbl = "ATTACK"; sprintf(#k_val, "%.1f ms", slider3); ) :
-    slot_i == 3 ? ( k_norm = (slider4 - 0.05) / 2.95; k_lbl = "RELEASE"; sprintf(#k_val, "%.2f s", slider4); ) :
-    slot_i == 4 ? ( k_lbl = "AUTO REL"; slider5 > 0.5 ? strcpy(#k_val, "DUAL") : strcpy(#k_val, "OFF"); ) :
-    slot_i == 5 ? ( k_norm = slider6 / 100; k_lbl = "CREST"; sprintf(#k_val, "%.0f %%", slider6); ) :
-    slot_i == 6 ? ( k_lbl = "KNEE";
-                    slider7 == 0 ? strcpy(#k_val, "Soft") :
-                    slider7 == 1 ? strcpy(#k_val, "Medium") : strcpy(#k_val, "Hard"); ) :
-    slot_i == 7 ? ( k_norm = slider8 / 100; k_lbl = "THRUST"; sprintf(#k_val, "%.0f %%", slider8); ) :
-    slot_i == 8 ? ( k_norm = slider9 / 24; k_lbl = "MAKEUP"; sprintf(#k_val, "%.1f dB", slider9); ) :
-    slot_i == 9 ? ( k_norm = slider10 / 100; k_lbl = "MIX"; sprintf(#k_val, "%.0f %%", slider10); ) :
-    slot_i == 10 ? ( k_norm = slider11 / 100; k_lbl = "THD"; sprintf(#k_val, "%.0f %%", slider11); ) :
-                   ( k_norm = (slider12 + 18) / 36; k_lbl = "OUTPUT"; sprintf(#k_val, "%.1f dB", slider12); );
-
-    is_btn = (slot_i == 1 || slot_i == 4 || slot_i == 6);
-
-    is_btn ? (
-      btn_w = 60; btn_h = 32;
-      gfx_r = 0.12; gfx_g = 0.14; gfx_b = 0.16;
-      gfx_rect(k_x - btn_w/2, k_y - btn_h/2, btn_w, btn_h, 1);
-
-      gfx_r = 0.30; gfx_g = 0.33; gfx_b = 0.38;
-      gfx_rect(k_x - btn_w/2, k_y - btn_h/2, btn_w, btn_h, 0);
-
-      gfx_measurestr(#k_val, str_w, str_h);
-      gfx_r = 1.0; gfx_g = 0.65; gfx_b = 0.20;
-      gfx_x = k_x - str_w/2; gfx_y = k_y - str_h/2;
-      gfx_drawstr(#k_val);
-
-      gfx_measurestr(k_lbl, lbl_w, lbl_h);
-      gfx_r = 0.70; gfx_g = 0.73; gfx_b = 0.78;
-      gfx_x = k_x - lbl_w/2; gfx_y = k_y + 32;
-      gfx_drawstr(k_lbl);
-    ) : (
-      radius = 26; angle = 2.356 + k_norm * 4.712;
-
-      gfx_r = 0.16; gfx_g = 0.18; gfx_b = 0.20; gfx_a = 1;
-      gfx_circle(k_x, k_y, radius, 1);
-
-      gfx_r = 0.30; gfx_g = 0.33; gfx_b = 0.38;
-      gfx_circle(k_x, k_y, radius, 0);
-
-      px = k_x + cos(angle) * (radius - 5);
-      py = k_y + sin(angle) * (radius - 5);
-      gfx_r = 1.0; gfx_g = 0.55; gfx_b = 0.10;
-      gfx_line(k_x, k_y, px, py, 2);
-
-      gfx_measurestr(k_lbl, lbl_w, lbl_h);
-      gfx_r = 0.70; gfx_g = 0.73; gfx_b = 0.78;
-      gfx_x = k_x - lbl_w/2; gfx_y = k_y + 32;
-      gfx_drawstr(k_lbl);
-
-      gfx_measurestr(#k_val, val_w, val_h);
-      gfx_r = 1.0; gfx_g = 0.65; gfx_b = 0.20;
-      gfx_x = k_x - val_w/2; gfx_y = k_y + 45;
-      gfx_drawstr(#k_val);
-    );
-    slot_i += 1;
-  );
-
-  // --- seletor de diagnostico (clicavel), so em modo dev ---
-  diag_dev ? (
-  diag == 0 ? strcpy(#diag_txt, "DIAG: OFF") :
-  diag == 1 ? strcpy(#diag_txt, "DIAG: SEM L/R") :
-  diag == 2 ? strcpy(#diag_txt, "DIAG: SEM CATCHER") :
-  diag == 3 ? strcpy(#diag_txt, "DIAG: SEM SHAPER") :
-  diag == 4 ? strcpy(#diag_txt, "DIAG: SO GANHO") :
-  diag == 5 ? strcpy(#diag_txt, "DIAG: SEM THD") :
-              strcpy(#diag_txt, "DIAG: SEM COMP");
-
-  diag == 0 ? (
-    gfx_r = 0.24; gfx_g = 0.26; gfx_b = 0.29; gfx_a = 1;
-    gfx_rect(diag_x, diag_y, diag_w, diag_h, 0);
-    gfx_r = 0.42; gfx_g = 0.45; gfx_b = 0.50;
+// seletor de fonte
+gfx_setfont(1, "Arial", 11);
+p_i = 0;
+loop(3,
+  px = VU_X + 4 + p_i * (PILL_W + 2);
+  p_i == vu_src ? (
+    col_accent(1); gfx_rect(px, PILL_Y, PILL_W, 19, 1);
+    gfx_set(0.165, 0.102, 0.031, 1);
   ) : (
-    gfx_r = 0.55; gfx_g = 0.22; gfx_b = 0.05; gfx_a = 1;
-    gfx_rect(diag_x, diag_y, diag_w, diag_h, 1);
-    gfx_r = 1.0; gfx_g = 0.80; gfx_b = 0.55;
+    gfx_set(0.137, 0.153, 0.176, 1); gfx_rect(px, PILL_Y, PILL_W, 19, 1);
+    gfx_set(0.475, 0.506, 0.545, 1);
   );
-  gfx_x = diag_x + 6; gfx_y = diag_y + 3;
-  gfx_drawstr(#diag_txt);
-  );
+  txt_c(p_i == 0 ? "out" : p_i == 1 ? "in" : "gr", px + PILL_W*0.5, PILL_Y + 4);
+  p_i += 1;
+);
 
-  mouse_down = (mouse_cap & 1) ? 1 : 0;
+// ---------------------------------------------------------------------
+// Knobs
+// ---------------------------------------------------------------------
+slot_i = 0;
+loop(12,
+  col = slot_i % 6;
+  row = floor(slot_i / 6);
+  cell_x = MARGIN + col * CELL_W;
+  cell_y = row == 0 ? ROW1_Y : ROW2_Y;
+  k_cx = cell_x + CELL_W * 0.5;
+  k_cy = cell_y + 38;
 
-  mouse_down && last_mouse_cap == 0 ? (
-    active_knob = -1; check_i = 0;
-    current_time = time_precise();
+  slot_i == 0 ? ( k_norm = (slider1 + 50) / 65; k_lbl = "THRESHOLD"; sprintf(#k_val, "%.1f dB", slider1); ) :
+  slot_i == 1 ? ( k_lbl = "RATIO";
+                  slider2 == 0 ? strcpy(#k_val, "1.5:1") :
+                  slider2 == 1 ? strcpy(#k_val, "2:1") :
+                  slider2 == 2 ? strcpy(#k_val, "3:1") :
+                  slider2 == 3 ? strcpy(#k_val, "4:1") : strcpy(#k_val, "10:1"); ) :
+  slot_i == 2 ? ( k_norm = (slider3 - 0.1) / 29.9; k_lbl = "ATTACK"; sprintf(#k_val, "%.1f ms", slider3); ) :
+  slot_i == 3 ? ( k_norm = (slider4 - 0.05) / 2.95; k_lbl = "RELEASE"; sprintf(#k_val, "%.2f s", slider4); ) :
+  slot_i == 4 ? ( k_lbl = "AUTO REL"; slider5 > 0.5 ? strcpy(#k_val, "dual") : strcpy(#k_val, "manual"); ) :
+  slot_i == 5 ? ( k_norm = slider6 / 100; k_lbl = "CREST"; sprintf(#k_val, "%.0f %%", slider6); ) :
+  slot_i == 6 ? ( k_lbl = "KNEE";
+                  slider7 == 0 ? strcpy(#k_val, "soft") :
+                  slider7 == 1 ? strcpy(#k_val, "medium") : strcpy(#k_val, "hard"); ) :
+  slot_i == 7 ? ( k_norm = slider8 / 100; k_lbl = "THRUST"; sprintf(#k_val, "%.0f %%", slider8); ) :
+  slot_i == 8 ? ( k_norm = slider9 / 24; k_lbl = "MAKEUP"; sprintf(#k_val, "%.1f dB", slider9); ) :
+  slot_i == 9 ? ( k_norm = slider10 / 100; k_lbl = "MIX"; sprintf(#k_val, "%.0f %%", slider10); ) :
+  slot_i == 10 ? ( k_norm = slider11 / 100; k_lbl = "THD"; sprintf(#k_val, "%.0f %%", slider11); ) :
+                 ( k_norm = (slider12 + 18) / 36; k_lbl = "OUTPUT"; sprintf(#k_val, "%.1f dB", slider12); );
 
-    (diag_dev && mouse_x >= diag_x && mouse_x <= diag_x + diag_w &&
-     mouse_y >= diag_y && mouse_y <= diag_y + diag_h) ? (
-      slider13 = slider13 >= 6 ? 0 : slider13 + 1;
-      slider_automate(slider13);
-      check_i = 99;
+  is_btn = (slot_i == 1 || slot_i == 4 || slot_i == 6);
+
+  gfx_setfont(1, "Arial", 11, 'b');
+  col_label(); txt_c(k_lbl, k_cx, cell_y);
+
+  is_btn ? (
+    col_accent(1);
+    gfx_rect(k_cx - 46, k_cy - 14, 92, 28, 1);
+    gfx_set(0.165, 0.102, 0.031, 1);
+    gfx_setfont(1, "Arial", 12, 'b');
+    txt_c(#k_val, k_cx, k_cy - 7);
+  ) : (
+    k_r = 21;
+    k_a = -2.356 + k_norm * 4.712;
+
+    // o Makeup fica esmaecido quando esta sob comando automatico
+    k_dim = (slot_i == 8 && auto_makeup) ? 0.45 : 1.0;
+
+    col_track();
+    thick_arc(k_cx, k_cy, k_r, -2.356, 2.356, 3);
+
+    k_norm > 0.004 ? (
+      col_accent(k_dim);
+      thick_arc(k_cx, k_cy, k_r, -2.356, k_a, 3);
     );
 
-    check_i == 99 ? ( check_i = 12; );
-    loop(12 - min(check_i, 12),
-      check_x = check_i % 6 == 0 ? x1 :
-                check_i % 6 == 1 ? x2 :
-                check_i % 6 == 2 ? x3 :
-                check_i % 6 == 3 ? x4 :
-                check_i % 6 == 4 ? x5 : x6;
-      check_y = check_i < 6 ? y1 : y2;
+    gfx_set(0.604, 0.639, 0.678, k_dim);
+    gfx_line(k_cx, k_cy, k_cx + sin(k_a)*(k_r-6), k_cy - cos(k_a)*(k_r-6), 1);
 
-      abs(mouse_x - check_x) < 32 && abs(mouse_y - check_y) < 32 ? (
+    gfx_setfont(1, "Arial", 12);
+    gfx_set(0.875, 0.894, 0.918, k_dim); txt_c(#k_val, k_cx, cell_y + 61);
+  );
 
+  slot_i += 1;
+);
+
+// botao de auto makeup
+gfx_setfont(1, "Arial", 11, 'b');
+auto_makeup ? (
+  col_accent(1); gfx_rect(AMK_X, AMK_Y, AMK_W, AMK_H, 1);
+  gfx_set(0.165, 0.102, 0.031, 1);
+) : (
+  gfx_set(0.106, 0.118, 0.137, 1); gfx_rect(AMK_X, AMK_Y, AMK_W, AMK_H, 1);
+  gfx_set(0.227, 0.251, 0.282, 1); gfx_rect(AMK_X, AMK_Y, AMK_W, AMK_H, 0);
+  gfx_set(0.667, 0.698, 0.741, 1);
+);
+txt_c("A", AMK_X + AMK_W*0.5, AMK_Y + 2);
+
+// ---------------------------------------------------------------------
+// Mouse
+// ---------------------------------------------------------------------
+mouse_down = (mouse_cap & 1) ? 1 : 0;
+
+mouse_down && last_mouse_cap == 0 ? (
+  active_knob = -1;
+  current_time = time_precise();
+  handled = 0;
+
+  // seletor de fonte do VU
+  (mouse_y >= PILL_Y && mouse_y <= PILL_Y + 19 &&
+   mouse_x >= VU_X + 4 && mouse_x <= VU_X + 4 + 3*(PILL_W+2)) ? (
+    slider13 = min(2, floor((mouse_x - VU_X - 4) / (PILL_W + 2)));
+    slider_automate(slider13);
+    handled = 1;
+  );
+
+  // botao de auto makeup, testado antes dos knobs porque fica sobre a celula
+  (handled == 0 && mouse_x >= AMK_X && mouse_x <= AMK_X + AMK_W &&
+   mouse_y >= AMK_Y && mouse_y <= AMK_Y + AMK_H) ? (
+    slider14 = slider14 > 0.5 ? 0 : 1;
+    slider_automate(slider14);
+    handled = 1;
+  );
+
+  handled == 0 ? (
+    check_i = 0;
+    loop(12,
+      c_col = check_i % 6;
+      c_row = floor(check_i / 6);
+      check_x = MARGIN + c_col * CELL_W + CELL_W * 0.5;
+      check_y = (c_row == 0 ? ROW1_Y : ROW2_Y) + 38;
+
+      abs(mouse_x - check_x) < 40 && abs(mouse_y - check_y) < 34 ? (
         is_alt_click = (mouse_cap & 16);
         is_double_click = (current_time - last_click_time < 0.3) && (last_clicked_knob == check_i);
 
@@ -543,7 +798,7 @@ gfx_getchar();
           check_i == 5 ? ( slider6 = 50; slider_automate(slider6); ) :
           check_i == 6 ? ( slider7 = 1; slider_automate(slider7); ) :
           check_i == 7 ? ( slider8 = 50; slider_automate(slider8); ) :
-          check_i == 8 ? ( slider9 = 0; slider_automate(slider9); ) :
+          check_i == 8 ? ( auto_makeup ? 0 : ( slider9 = 0; slider_automate(slider9); ); ) :
           check_i == 9 ? ( slider10 = 100; slider_automate(slider10); ) :
           check_i == 10 ? ( slider11 = 0; slider_automate(slider11); ) :
           check_i == 11 ? ( slider12 = 0; slider_automate(slider12); );
@@ -570,54 +825,52 @@ gfx_getchar();
       check_i += 1;
     );
   );
+);
 
-  mouse_down && active_knob >= 0 ? (
-    drag_dy = start_mouse_y - mouse_y;
-    sens = (mouse_cap & 12) ? 0.001 : 0.008;
+mouse_down && active_knob >= 0 ? (
+  drag_dy = start_mouse_y - mouse_y;
+  sens = (mouse_cap & 12) ? 0.001 : 0.008;
 
-    active_knob == 0 ? ( slider1 = min(15, max(-50, start_val_0 + drag_dy * 65 * sens)); slider_automate(slider1); ) :
-    active_knob == 2 ? ( slider3 = min(30, max(0.1, start_val_2 + drag_dy * 29.9 * sens)); slider_automate(slider3); ) :
-    active_knob == 3 ? ( slider4 = min(3.0, max(0.05, start_val_3 + drag_dy * 2.95 * sens)); slider_automate(slider4); ) :
-    active_knob == 5 ? ( slider6 = min(100, max(0, floor(start_val_5 + drag_dy * 100 * sens + 0.5))); slider_automate(slider6); ) :
-    active_knob == 7 ? ( slider8 = min(100, max(0, floor(start_val_7 + drag_dy * 100 * sens + 0.5))); slider_automate(slider8); ) :
-    active_knob == 8 ? ( slider9 = min(24, max(0, start_val_8 + drag_dy * 24 * sens)); slider_automate(slider9); ) :
-    active_knob == 9 ? ( slider10 = min(100, max(0, floor(start_val_9 + drag_dy * 100 * sens + 0.5))); slider_automate(slider10); ) :
-    active_knob == 10 ? ( slider11 = min(100, max(0, floor(start_val_10 + drag_dy * 100 * sens + 0.5))); slider_automate(slider11); ) :
-    active_knob == 11 ? ( slider12 = min(18, max(-18, start_val_11 + drag_dy * 36 * sens)); slider_automate(slider12); );
-  );
+  active_knob == 0 ? ( slider1 = min(15, max(-50, start_val_0 + drag_dy * 65 * sens)); slider_automate(slider1); ) :
+  active_knob == 2 ? ( slider3 = min(30, max(0.1, start_val_2 + drag_dy * 29.9 * sens)); slider_automate(slider3); ) :
+  active_knob == 3 ? ( slider4 = min(3.0, max(0.05, start_val_3 + drag_dy * 2.95 * sens)); slider_automate(slider4); ) :
+  active_knob == 5 ? ( slider6 = min(100, max(0, floor(start_val_5 + drag_dy * 100 * sens + 0.5))); slider_automate(slider6); ) :
+  active_knob == 7 ? ( slider8 = min(100, max(0, floor(start_val_7 + drag_dy * 100 * sens + 0.5))); slider_automate(slider8); ) :
+  active_knob == 8 ? ( auto_makeup ? 0 : ( slider9 = min(24, max(0, start_val_8 + drag_dy * 24 * sens)); slider_automate(slider9); ); ) :
+  active_knob == 9 ? ( slider10 = min(100, max(0, floor(start_val_9 + drag_dy * 100 * sens + 0.5))); slider_automate(slider10); ) :
+  active_knob == 10 ? ( slider11 = min(100, max(0, floor(start_val_10 + drag_dy * 100 * sens + 0.5))); slider_automate(slider11); ) :
+  active_knob == 11 ? ( slider12 = min(18, max(-18, start_val_11 + drag_dy * 36 * sens)); slider_automate(slider12); );
+);
 
-  mouse_down == 0 ? active_knob = -1;
-  last_mouse_cap = mouse_down;
+mouse_down == 0 ? active_knob = -1;
+last_mouse_cap = mouse_down;
 
-  mouse_wheel != 0 ? (
-    check_i = 0;
-    loop(12,
-      check_x = check_i % 6 == 0 ? x1 :
-                check_i % 6 == 1 ? x2 :
-                check_i % 6 == 2 ? x3 :
-                check_i % 6 == 3 ? x4 :
-                check_i % 6 == 4 ? x5 : x6;
-      check_y = check_i < 6 ? y1 : y2;
+mouse_wheel != 0 ? (
+  check_i = 0;
+  loop(12,
+    c_col = check_i % 6;
+    c_row = floor(check_i / 6);
+    check_x = MARGIN + c_col * CELL_W + CELL_W * 0.5;
+    check_y = (c_row == 0 ? ROW1_Y : ROW2_Y) + 38;
 
-      abs(mouse_x - check_x) < 32 && abs(mouse_y - check_y) < 32 ? (
-        is_btn = (check_i == 1 || check_i == 4 || check_i == 6);
-        is_btn == 0 ? (
-          wheel_delta = mouse_wheel / 120;
-          wheel_sens = (mouse_cap & 12) ? 0.005 : 0.025;
+    abs(mouse_x - check_x) < 40 && abs(mouse_y - check_y) < 34 ? (
+      is_btn = (check_i == 1 || check_i == 4 || check_i == 6);
+      is_btn == 0 ? (
+        wheel_delta = mouse_wheel / 120;
+        wheel_sens = (mouse_cap & 12) ? 0.005 : 0.025;
 
-          check_i == 0 ? ( slider1 = min(15, max(-50, slider1 + wheel_delta * 65 * wheel_sens)); slider_automate(slider1); ) :
-          check_i == 2 ? ( slider3 = min(30, max(0.1, slider3 + wheel_delta * 29.9 * wheel_sens)); slider_automate(slider3); ) :
-          check_i == 3 ? ( slider4 = min(3.0, max(0.05, slider4 + wheel_delta * 2.95 * wheel_sens)); slider_automate(slider4); ) :
-          check_i == 5 ? ( slider6 = min(100, max(0, floor(slider6 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider6); ) :
-          check_i == 7 ? ( slider8 = min(100, max(0, floor(slider8 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider8); ) :
-          check_i == 8 ? ( slider9 = min(24, max(0, slider9 + wheel_delta * 24 * wheel_sens)); slider_automate(slider9); ) :
-          check_i == 9 ? ( slider10 = min(100, max(0, floor(slider10 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider10); ) :
-          check_i == 10 ? ( slider11 = min(100, max(0, floor(slider11 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider11); ) :
-          check_i == 11 ? ( slider12 = min(18, max(-18, slider12 + wheel_delta * 36 * wheel_sens)); slider_automate(slider12); );
-        );
+        check_i == 0 ? ( slider1 = min(15, max(-50, slider1 + wheel_delta * 65 * wheel_sens)); slider_automate(slider1); ) :
+        check_i == 2 ? ( slider3 = min(30, max(0.1, slider3 + wheel_delta * 29.9 * wheel_sens)); slider_automate(slider3); ) :
+        check_i == 3 ? ( slider4 = min(3.0, max(0.05, slider4 + wheel_delta * 2.95 * wheel_sens)); slider_automate(slider4); ) :
+        check_i == 5 ? ( slider6 = min(100, max(0, floor(slider6 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider6); ) :
+        check_i == 7 ? ( slider8 = min(100, max(0, floor(slider8 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider8); ) :
+        check_i == 8 ? ( auto_makeup ? 0 : ( slider9 = min(24, max(0, slider9 + wheel_delta * 24 * wheel_sens)); slider_automate(slider9); ); ) :
+        check_i == 9 ? ( slider10 = min(100, max(0, floor(slider10 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider10); ) :
+        check_i == 10 ? ( slider11 = min(100, max(0, floor(slider11 + wheel_delta * 100 * wheel_sens + 0.5))); slider_automate(slider11); ) :
+        check_i == 11 ? ( slider12 = min(18, max(-18, slider12 + wheel_delta * 36 * wheel_sens)); slider_automate(slider12); );
       );
-      check_i += 1;
     );
-    mouse_wheel = 0;
+    check_i += 1;
   );
+  mouse_wheel = 0;
 );
