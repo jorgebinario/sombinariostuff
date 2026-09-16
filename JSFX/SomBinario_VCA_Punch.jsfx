@@ -97,6 +97,7 @@ PILL_Y = VU_Y + VU_H + 4;
 PILL_W = floor((VU_W - 12) / 3);
 DB_TOP = 0; DB_BOT = -54;
 shown_gr = 0; shown_out = -60;
+gr_hold = 0; out_hold = 0;
 
 TILT_N   = 7;      // secoes do tilt
 TILT_F0  = 15;     // faixa em que a inclinacao e valida
@@ -518,8 +519,24 @@ scope_gr[scope_pos]  = gr_meter;
 scope_pos += 1;
 scope_pos >= SCOPE_N ? scope_pos = 0;
 
-shown_gr  = max(gr_meter,  shown_gr  - 1.5);
-shown_out = max(cur_out_db, shown_out - 3);
+// Retencao de pico: ao bater um valor novo o numero congela por um instante,
+// e so depois volta a cair. Sem isso a leitura muda rapido demais para ser
+// lida. 40 quadros a 60 Hz sao dois tercos de segundo.
+HOLD_FRAMES = 40;
+
+gr_meter >= shown_gr ? (
+  shown_gr = gr_meter;
+  gr_hold = HOLD_FRAMES;
+) : (
+  gr_hold > 0 ? ( gr_hold -= 1; ) : ( shown_gr = max(gr_meter, shown_gr - 1.5); );
+);
+
+cur_out_db >= shown_out ? (
+  shown_out = cur_out_db;
+  out_hold = HOLD_FRAMES;
+) : (
+  out_hold > 0 ? ( out_hold -= 1; ) : ( shown_out = max(cur_out_db, shown_out - 3); );
+);
 
 // ---------------------------------------------------------------------
 // Fundo e cabecalho
